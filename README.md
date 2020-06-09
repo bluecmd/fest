@@ -1,6 +1,6 @@
 # Front-End for easy Secure Transport (FEST)
 
-FEST, which also happens to mean which means Party or Feast in Swedish, is
+FEST, which also happens to mean Party or Feast in Swedish, is
 a proxy that lives on the edge of a network providing easy TLS management,
 as well as secure user management.
 
@@ -21,6 +21,11 @@ mentioned.
 
 Daemons or API clients will be authenticated using mutual TLS authentication
 which will optionally be passed onto the backend.
+
+This is implemented by watching the TLS handshake to extract the client
+certificate information from the handshake, allowing the connection to still
+be end-to-end encrypted, and the client certificate to be forwarded to the
+backend.
 
 ## Authorization
 
