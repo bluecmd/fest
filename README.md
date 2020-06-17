@@ -20,12 +20,10 @@ mentioned.
 ## Daemon Authentication
 
 Daemons or API clients will be authenticated using mutual TLS authentication
-which will optionally be passed onto the backend.
+which will optionally be passed onto the backend as re-generated certificates.
 
-This is implemented by watching the TLS handshake to extract the client
-certificate information from the handshake, allowing the connection to still
-be end-to-end encrypted, and the client certificate to be forwarded to the
-backend.
+This means that even browser connections using conventional OAuth or similar
+will look like normal mTLS connections on the backend.
 
 ## Authorization
 
