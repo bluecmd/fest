@@ -207,7 +207,7 @@ func TestACME(t *testing.T) {
 func TestFailedACME(t *testing.T) {
 	ctx := context.Background()
 
-	// Responding to challenges is tested in the integration test
+	// Test response when challenge fails
 	os.Setenv("PEBBLE_VA_ALWAYS_VALID", "0")
 	os.Setenv("PEBBLE_VA_NOSLEEP", "1")
 
