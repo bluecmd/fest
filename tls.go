@@ -33,7 +33,21 @@ func frontendTLSConfig(ci *tls.ClientHelloInfo) (*tls.Config, error) {
 	if ci.ServerName == "" {
 		return nil, fmt.Errorf("no SNI present in request")
 	}
-	return nil, fmt.Errorf("server %q not configured", ci.ServerName)
+	return &tls.Config{
+		GetCertificate: frontendTLSCertificate,
+	}, nil
+}
+
+func frontendTLSCertificate(ci *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	if ci.ServerName == "" {
+		return nil, fmt.Errorf("no SNI present in request")
+	}
+	// TODO(bluecmd): Probably need a lock here
+	c, ok := certMap[ci.ServerName]
+	if !ok {
+		return nil, fmt.Errorf("server %q not configured", ci.ServerName)
+	}
+	return c.t, nil
 }
 
 func tlsServer(s net.Listener) {

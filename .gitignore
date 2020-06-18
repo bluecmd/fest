@@ -2,3 +2,4 @@ fest
 .*.swp
 acme.key
 config.textpb
+certs/

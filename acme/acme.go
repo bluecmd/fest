@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	lifetimePadding = 7 * 24 * time.Hour
+	LifetimePadding = 7 * 24 * time.Hour
 )
 
 var (
@@ -84,7 +84,7 @@ func (m *Manager) maybeRenew(ctx context.Context, n time.Time, kp *tls.Certifica
 	}
 
 	validFrom := c.NotBefore
-	expires := c.NotAfter.Add(lifetimePadding * -1)
+	expires := c.NotAfter.Add(LifetimePadding * -1)
 
 	if validFrom.After(n) || expires.Before(n) {
 		// Not yet valid, or has expired
@@ -135,6 +135,8 @@ func (m *Manager) Login(ctx context.Context) error {
 }
 
 func (m *Manager) Mint(ctx context.Context, names ...string) (*tls.Certificate, error) {
+	// TODO(bluecmd): Add simple HTTP-01 pseudo implementation here to do a smoke
+	// test before sending the request to the real ACME server.
 	if m.acct == nil {
 		return nil, fmt.Errorf("tried renew without calling Login() first")
 	}
@@ -212,5 +214,11 @@ func (m *Manager) Mint(ctx context.Context, names ...string) (*tls.Certificate, 
 		opsSucceeded.WithLabelValues("http-01", n).Add(1)
 	}
 	cert.Certificate = der
+
+	xc, err := x509.ParseCertificate(der[0])
+	if err != nil {
+		return nil, fmt.Errorf("x509.ParseCertificate: %v", err)
+	}
+	cert.Leaf = xc
 	return &cert, nil
 }

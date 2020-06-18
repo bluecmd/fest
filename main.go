@@ -24,7 +24,8 @@ var (
 	acmeContact   = flag.String("acme_contact", "", "which contact to register ACME account to, e.g. mailto:operator@dns.domain")
 	configFile    = flag.String("config_file", "config.textpb", "path to configuration file")
 
-	config *pb.Config
+	config      *pb.Config
+	certManager *acme.Manager
 )
 
 func startACMEManager() *acme.Manager {
@@ -94,7 +95,7 @@ func main() {
 		log.Fatalf("Prometheus Metrics endpoint failed: %v", http.ListenAndServe("[::]:9723", nil))
 	}()
 
-	_ = startACMEManager()
+	certManager = startACMEManager()
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGHUP)
@@ -110,6 +111,7 @@ func main() {
 			// TODO(bluecmd): Might need some locking here
 			config = nc
 			log.Printf("New configuration successfully loaded")
+			pokeWatcher()
 		}
 	}()
 
@@ -119,6 +121,7 @@ func main() {
 		log.Fatalf("Failed to load initial configuration: %v", err)
 	}
 	log.Printf("Configuration file loaded")
+	pokeWatcher()
 
 	_ = config
 
@@ -150,6 +153,8 @@ func main() {
 	go tlsServer(s)
 
 	log.Printf("Running...")
+
+	startWatcher()
 
 	select {}
 }
