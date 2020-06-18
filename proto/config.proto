@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+option go_package = "github.com/bluecmd/fest/proto";
+
+package fest;
+
+message AuthzUser {
+  string name = 1;
+
+  enum Provider {
+    UNKNOWN = 0;
+    GOOGLE = 1;
+    GITHUB = 2;
+    U2F = 3;
+  }
+  Provider provider = 2;
+}
+
+message Authorization {
+  repeated AuthzUser user = 1;
+}
+
+message Authentication {
+  bool google = 1;
+
+  bool github = 2;
+
+  bool u2f = 3;
+}
+
+message Frontend {
+  // Respond to HTTP requests for this service by sending 301 redirects to
+  // the HTTPS endpoint.
+  bool redirect_http = 1;
+}
+
+message PlainBackend {
+  string endpoint = 1;
+}
+
+message TLSBackend {
+  string endpoint = 1;
+
+  // If set to false, any TLS validation will be ingored towards the backend.
+  bool verify = 2;
+
+  // X.509 certificate, PEM encoded, to trust for connections to the backend.
+  repeated string trust = 3;
+}
+
+message Backend {
+  // Enable this for backends that are over plain TCP.
+  PlainBackend plain = 1;
+
+  // Enable this for backends that are over TLS.
+  TLSBackend tls = 2;
+}
+
+message Service {
+  // The hostname and SNI this service is for.
+  // This needs to be unique.
+  string name = 1;
+
+  // Configuration on the TLS/HTTPS side towards the client.
+  Frontend frontend = 2;
+
+  // Configuration on the TLS/HTTPS side towards the backend server.
+  Backend backend = 3;
+
+  // Tuning of authentication parameters and which providers are enabled.
+  Authentication authentication = 4;
+
+  // Declaration of which roles are allowed to access the service.
+  Authorization authorization = 5;
+}
+
+message Config {
+  repeated Service service = 1;
+}

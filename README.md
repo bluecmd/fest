@@ -35,3 +35,17 @@ Protobufs. Live reload of configuration will be supported.
 Flow logs of traffic will be outputted to the console as well as auditing data
 about the authentication and authorization decisions done. No logging of traffic
 forwarded will be implemented.
+
+## Protobuf definitions
+
+When updating the .proto file, make sure to update and commit the updated Go
+implementation. The reason for this is to make it trivial to include the
+definitions without having to do a pre-build step in Go.
+
+1. Make sure you have `protoc` installed. On Debian this can be installed via
+   `apt install protobuf-compiler`.
+
+2. Install `protoc-gen-go` by running
+   `go get -u github.com/golang/protobuf/protoc-gen-go`.
+
+3. Run `make -C proto` to update the .pb.go file(s).
