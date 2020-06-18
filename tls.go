@@ -27,6 +27,14 @@ func tlsHandler(rc net.Conn) {
 		return
 	}
 	tlsLog(rc, "open")
+
+	// TODO: Actual backend code here
+	rc.Write([]byte(`
+HTTP/1.1 404 Not Found
+Content-Type: text/plain; charset=UTF-8
+
+TODO
+`))
 }
 
 func frontendTLSConfig(ci *tls.ClientHelloInfo) (*tls.Config, error) {
