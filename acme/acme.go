@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"golang.org/x/crypto/acme"
 )
 
@@ -21,8 +23,36 @@ const (
 
 var (
 	ErrRejected = errors.New("order was rejected")
-)
 
+	opsChalsAccepted = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fest_acme_challanges_accepted_total",
+			Help: "The total number of ACME challenges accepted",
+		},
+		[]string{"type"},
+	)
+	opsFailed = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fest_acme_rejected_mints_total",
+			Help: "The total number of ACME minting requests which were rejected",
+		},
+		[]string{"challenge", "name"},
+	)
+	opsSucceeded = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fest_acme_succeeded_mints_total",
+			Help: "The total number of ACME minting requests which completed successfully",
+		},
+		[]string{"challenge", "name"},
+	)
+	opsTries = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fest_acme_tried_mints_total",
+			Help: "The total number of attempts for ACME minting requests",
+		},
+		[]string{"name"},
+	)
+)
 
 type Config struct {
 	Directory   string
@@ -31,9 +61,10 @@ type Config struct {
 }
 
 type Manager struct {
-	AccountKey *ecdsa.PrivateKey
-	Config     *Config
-	HTTPClient *http.Client
+	AccountKey    *ecdsa.PrivateKey
+	Config        *Config
+	HTTPClient    *http.Client
+	HTTP01Handler func(path, value string)
 
 	acct *acme.Account
 }
@@ -111,6 +142,7 @@ func (m *Manager) Mint(ctx context.Context, names ...string) (*tls.Certificate, 
 	var authz []acme.AuthzID
 	for _, n := range names {
 		authz = append(authz, acme.AuthzID{Type: "dns", Value: n})
+		opsTries.WithLabelValues(n).Add(1)
 	}
 
 	order, err := c.AuthorizeOrder(ctx, authz)
@@ -139,10 +171,21 @@ func (m *Manager) Mint(ctx context.Context, names ...string) (*tls.Certificate, 
 		return nil, fmt.Errorf("acme.Accept: %v", err)
 	}
 
+	chpath := c.HTTP01ChallengePath(challenge.Token)
+	chresp, err := c.HTTP01ChallengeResponse(challenge.Token)
+	if err != nil {
+		return nil, fmt.Errorf("acme.HTTP01ChallengeResponse: %v", err)
+	}
+
+	m.HTTP01Handler(chpath, chresp)
+
 	_, err = c.WaitOrder(ctx, order.AuthzURLs[0])
 	if err != nil {
 		_, ok := err.(*acme.OrderError)
 		if ok {
+			for _, n := range names {
+				opsFailed.WithLabelValues("http-01", n).Add(1)
+			}
 			return nil, ErrRejected
 		} else {
 			return nil, fmt.Errorf("WaitOrder: %v", err)
@@ -165,6 +208,9 @@ func (m *Manager) Mint(ctx context.Context, names ...string) (*tls.Certificate, 
 		return nil, fmt.Errorf("acme.CreateOrderCert: %v", err)
 	}
 
+	for _, n := range names {
+		opsSucceeded.WithLabelValues("http-01", n).Add(1)
+	}
 	cert.Certificate = der
 	return &cert, nil
 }

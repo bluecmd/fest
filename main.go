@@ -9,12 +9,13 @@ import (
 	"net/http"
 
 	"github.com/bluecmd/fest/acme"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
-	acmeTerms = flag.String("acme_terms", "", "set if user agrees with the ACME server's T&C")
+	acmeTerms     = flag.String("acme_terms", "", "set if user agrees with the ACME server's T&C")
 	acmeDirectory = flag.String("acme_directory", "https://acme-staging-v02.api.letsencrypt.org/directory", "which ACME directory to register to")
-	acmeContact = flag.String("acme_contact", "", "which contact to register ACME account to, e.g. mailto:operator@dns.domain")
+	acmeContact   = flag.String("acme_contact", "", "which contact to register ACME account to, e.g. mailto:operator@dns.domain")
 )
 
 func startACMEManager() *acme.Manager {
@@ -23,12 +24,9 @@ func startACMEManager() *acme.Manager {
 		log.Fatalf("Failed to load ACME key: %v", err)
 	}
 
-	if *acmeContact == "" {
-		log.Fatalf("--acme_contact must be set")
-	}
-
 	cm := &acme.Manager{
-		AccountKey:   akey,
+		AccountKey:    akey,
+		HTTP01Handler: registerHTTP01Challenge,
 		Config: &acme.Config{
 			Directory:   *acmeDirectory,
 			AgreedTerms: *acmeTerms,
@@ -42,6 +40,10 @@ func startACMEManager() *acme.Manager {
 	}
 	log.Printf("ACME INFO: Current ACME T&C is %q", tc)
 
+	if *acmeContact == "" {
+		log.Fatalf("--acme_contact must be set")
+	}
+
 	if err := cm.Login(context.Background()); err != nil {
 		log.Fatalf("Failed to login or register to ACME server: %v", err)
 	}
@@ -52,7 +54,7 @@ func main() {
 	flag.Parse()
 
 	log.Printf("")
-	log.Printf(`  ███████╗███████╗███████╗████████╗`)
+	log.Printf(`  ████████╗███████╗███████╗████████╗`)
 	log.Printf(`  ███╔════╝██╔════╝██╔════╝╚══██╔══╝`)
 	log.Printf(`  ██████╗  █████╗  ███████╗   ██║`)
 	log.Printf(`  ███╔══╝  ██╔══╝  ╚════██║   ██║`)
@@ -61,6 +63,13 @@ func main() {
 	log.Printf("")
 	log.Printf("FEST is starting up")
 	log.Printf("")
+
+	// Prometheus Metrics come first
+	http.Handle("/metrics", promhttp.Handler())
+	go func() {
+		log.Printf("Starting Prometheus Metrics endpoint at http://[::]:9723/metrics")
+		log.Fatalf("Prometheus Metrics endpoint failed: %v", http.ListenAndServe("[::]:9723", nil))
+	}()
 
 	_ = startACMEManager()
 

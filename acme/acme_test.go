@@ -114,7 +114,6 @@ func newManager(t *testing.T) *Manager {
 	db := db.NewMemoryStore()
 	ca := ca.New(logger, db, "", 0)
 
-
 	// Enable strict mode to test upcoming API breaking changes
 	strictMode := true
 	va := va.New(logger, 80, 443, strictMode, "")
@@ -143,10 +142,11 @@ func newManager(t *testing.T) *Manager {
 	m := &Manager{
 		AccountKey: pk,
 		Config: &Config{
-			Directory:   fmt.Sprintf("https://%s/dir", l.Addr().String()),
-			Contact:     "mailto:nobody@localhost",
+			Directory: fmt.Sprintf("https://%s/dir", l.Addr().String()),
+			Contact:   "mailto:nobody@localhost",
 		},
-		HTTPClient: newTrustingHTTPClient(&cert),
+		HTTPClient:    newTrustingHTTPClient(&cert),
+		HTTP01Handler: func(p, v string) {},
 	}
 
 	m.Config.AgreedTerms, err = m.CurrentTerms(ctx)
