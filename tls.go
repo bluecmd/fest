@@ -42,7 +42,9 @@ func frontendTLSConfig(ci *tls.ClientHelloInfo) (*tls.Config, error) {
 		return nil, fmt.Errorf("no SNI present in request")
 	}
 	return &tls.Config{
-		GetCertificate: frontendTLSCertificate,
+		GetCertificate:           frontendTLSCertificate,
+		MinVersion:               tls.VersionTLS12,
+		PreferServerCipherSuites: true,
 	}, nil
 }
 
