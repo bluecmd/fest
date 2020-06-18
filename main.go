@@ -53,6 +53,9 @@ func startACMEManager() *acme.Manager {
 	if *acmeContact == "" {
 		log.Fatalf("--acme_contact must be set")
 	}
+	if *acmeTerms == "" {
+		log.Fatalf("--acme_terms must be set")
+	}
 
 	if err := cm.Login(context.Background()); err != nil {
 		log.Fatalf("Failed to login or register to ACME server: %v", err)
