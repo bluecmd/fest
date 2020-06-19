@@ -5,6 +5,19 @@ import (
 	"fmt"
 	"log"
 	"net"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+var (
+	activeConns = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "fest_active_connections",
+			Help: "Current number of active connections",
+		},
+		[]string{"service"},
+	)
 )
 
 func tlsLog(c net.Conn, format string, v ...interface{}) {
@@ -36,6 +49,8 @@ func tlsHandler(rc net.Conn) {
 		return
 	}
 
+	activeConns.WithLabelValues(cs.ServerName).Add(1)
+	defer activeConns.WithLabelValues(cs.ServerName).Sub(1)
 	tlsLog(c, "open, sni=%q, protocol=%q", cs.ServerName, cs.NegotiatedProtocol)
 
 	if err := backendServeConn(c, svc); err != nil {
@@ -47,11 +62,23 @@ func frontendTLSConfig(ci *tls.ClientHelloInfo) (*tls.Config, error) {
 	if ci.ServerName == "" {
 		return nil, fmt.Errorf("no SNI present in request")
 	}
+	svc, ok := serviceMap[ci.ServerName]
+	if !ok {
+		return nil, fmt.Errorf("server %q not configured", ci.ServerName)
+	}
+	np := []string{"h2", "http/1.1"}
+	if svc.pb != nil {
+		if fe := svc.pb.GetFrontend(); fe != nil {
+			if fe.GetDisableHttp2() {
+				np = []string{"http/1.1"}
+			}
+		}
+	}
 	return &tls.Config{
 		GetCertificate:           frontendTLSCertificate,
 		MinVersion:               tls.VersionTLS12,
 		PreferServerCipherSuites: true,
-		NextProtos:               []string{"h2", "http/1.1"},
+		NextProtos:               np,
 	}, nil
 }
 

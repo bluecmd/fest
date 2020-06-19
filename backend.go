@@ -4,8 +4,12 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
+
+	pb "github.com/bluecmd/fest/proto"
 )
 
 var (
@@ -44,7 +48,54 @@ func backendServeConn(c *tls.Conn, svc *Service) error {
 		return authServeConn(c, svc)
 	}
 
-	return fmt.Errorf("backend not implemented")
+	be := svc.pb.GetBackend()
+	if be == nil {
+		return fmt.Errorf("configuration missing")
+	}
+
+	// TODO(bluecmd): Implement authn and authz here.
+	// For connections that do not present a client certificate we will have to
+	// become a HTTP proxy for the first request in order to extract the
+	// authentication cookie.
+	// This will be a bit tricky.
+
+	user := "<todo>"
+	tlsLog(c, "authz ok, principal=%q", user)
+
+	var bc net.Conn
+	var err error
+	if tls := be.GetTls(); tls != nil {
+		bc, err = newTLSBackendConn(tls, c.ConnectionState().NegotiatedProtocol)
+	} else {
+		return fmt.Errorf("type not implemented")
+	}
+
+	if err != nil {
+		return err
+	}
+
+	defer bc.Close()
+
+	go io.Copy(bc, c)
+	io.Copy(c, bc)
+	return nil
+}
+
+func newTLSBackendConn(pb *pb.TLSBackend, alpn string) (net.Conn, error) {
+	np := []string{}
+	if alpn != "" {
+		np = append(np, alpn)
+	}
+	return tls.Dial("tcp", pb.GetEndpoint(), &tls.Config{
+		InsecureSkipVerify: pb.GetSkipVerify(),
+		NextProtos:         np,
+	})
+}
+
+func authHttpLog(r *http.Request, format string, v ...interface{}) {
+	s := fmt.Sprintf(format, v...)
+	l := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
+	log.Printf("AuthHTTP %s -> %s, host=%q, method=%q, path=%q, %s", r.RemoteAddr, l, r.Host, r.Method, r.URL.Path, s)
 }
 
 func authServeConn(c *tls.Conn, svc *Service) error {
@@ -60,5 +111,6 @@ func authServeConn(c *tls.Conn, svc *Service) error {
 }
 
 func authHTTPHandler(w http.ResponseWriter, r *http.Request) {
+	authHttpLog(r, "not-found")
 	http.NotFound(w, r)
 }
