@@ -41,6 +41,12 @@ type Service struct {
 	pb *pb.Service
 	// Used to cancel the scheduled renew operation
 	cancel chan bool
+
+	// TODO(bluecmd): On load, probe the backend to see if it supports
+	// http2 or other alpn protocols. That way we can learn good defaults
+	// from the remote without needing the user configuring it
+	// (like, disable_http2). Might still keep the option to disable it explicitly though
+	// as a workaround.
 }
 
 func pokeWatcher() {
