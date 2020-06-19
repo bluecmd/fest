@@ -36,7 +36,7 @@ var (
 )
 
 type Service struct {
-	t *tls.Certificate
+	cert *tls.Certificate
 	// If nil, this is an auth domain
 	pb *pb.Service
 	// Used to cancel the scheduled renew operation
@@ -78,7 +78,7 @@ func loadCert(domain string) (*tls.Certificate, error) {
 
 func scheduleRenew(domain string, c *Service) {
 	for {
-		xc := c.t.Leaf
+		xc := c.cert.Leaf
 		certExpires.WithLabelValues(domain).Set(float64(xc.NotAfter.Unix()))
 		expires := xc.NotAfter.Add(acme.LifetimePadding * -1)
 		log.Printf("Scheduling renewal for %q at %s", domain, expires)
@@ -91,11 +91,11 @@ func scheduleRenew(domain string, c *Service) {
 		}
 		log.Printf("Renewal due for %q", domain)
 
-		nt, err := certManager.MaybeRenew(context.Background(), c.t)
+		nt, err := certManager.MaybeRenew(context.Background(), c.cert)
 		if err != nil {
 			log.Printf("Renewal for %q failed: %v", domain, err)
 			loadedCerts.WithLabelValues(domain).Set(0)
-			c.t = nil
+			c.cert = nil
 			return
 		}
 
@@ -105,7 +105,7 @@ func scheduleRenew(domain string, c *Service) {
 			log.Printf("Failed to save renewed certificate for %q: %v", domain, err)
 		}
 
-		c.t = nt
+		c.cert = nt
 		log.Printf("Successfully renewed certificate for %q", domain)
 	}
 }
@@ -139,22 +139,25 @@ func startWatcher() {
 				domain := svc.GetName()
 				tc, ok := cm[domain]
 				if !ok {
-					tc = &Service{cancel: make(chan bool, 1)}
+					tc = &Service{
+						pb:     svc,
+						cancel: make(chan bool, 1),
+					}
 					cm[domain] = tc
 				}
 			}
 
 			// Copy certficiates if already loaded, and abort all renewals
-			for domain, tc := range serviceMap {
-				tc.cancel <- true
-				t, ok := cm[domain]
+			for domain, oldt := range serviceMap {
+				oldt.cancel <- true
+				newt, ok := cm[domain]
 				if ok {
-					t.t = tc.t
+					newt.cert = oldt.cert
 				}
 			}
 
-			for domain, tc := range cm {
-				if tc.t == nil {
+			for domain, t := range cm {
+				if t.cert == nil {
 					loadedCerts.WithLabelValues(domain).Set(0)
 					c, err := loadCert(domain)
 					if err != nil {
@@ -165,10 +168,10 @@ func startWatcher() {
 						log.Printf("Successfully loaded certificate for %q", domain)
 						loadedCerts.WithLabelValues(domain).Set(1)
 					}
-					tc.t = c
+					t.cert = c
 				}
-				if tc.t != nil {
-					go scheduleRenew(domain, tc)
+				if t.cert != nil {
+					go scheduleRenew(domain, t)
 				}
 			}
 			serviceMap = cm

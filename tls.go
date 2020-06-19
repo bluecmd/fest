@@ -3,13 +3,8 @@ package main
 import (
 	"crypto/tls"
 	"fmt"
-	"io"
-	"io/ioutil"
 	"log"
 	"net"
-	"net/http"
-
-	"golang.org/x/net/http2"
 )
 
 func tlsLog(c net.Conn, format string, v ...interface{}) {
@@ -20,39 +15,31 @@ func tlsLog(c net.Conn, format string, v ...interface{}) {
 func tlsHandler(rc net.Conn) {
 	defer rc.Close()
 	defer tlsLog(rc, "close")
-	tlsLog(rc, "handshake")
 
 	c, ok := rc.(*tls.Conn)
 	if !ok {
 		tlsLog(rc, "handshake failed: not TLS connection")
 		return
 	}
+
+	tlsLog(c, "handshake")
+
 	if err := c.Handshake(); err != nil {
-		tlsLog(rc, "handshake failed: %v", err)
+		tlsLog(c, "handshake failed: %v", err)
 		return
 	}
-	tlsLog(rc, "open, protocol=%q", c.ConnectionState().NegotiatedProtocol)
 
-	// TODO: Actual backend code here
+	cs := c.ConnectionState()
+	svc, ok := serviceMap[cs.ServerName]
+	if !ok {
+		tlsLog(c, "handshake failed: server %q not known", cs.ServerName)
+		return
+	}
 
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.NotFound(w, r)
-	})
-	if c.ConnectionState().NegotiatedProtocol == "h2" {
-		// Do HTTP/2
-		s := &http2.Server{}
-		s.ServeConn(c, &http2.ServeConnOpts{
-			Handler: handler,
-		})
-	} else {
-		// Fallback to HTTP/1.1
-		go io.Copy(ioutil.Discard, c)
-		c.Write([]byte(`HTTP/1.1 404 Not Found
-Content-Type: text/plain; charset=UTF-8
-Content-Length: 4
-Connection: close
+	tlsLog(c, "open, sni=%q, protocol=%q", cs.ServerName, cs.NegotiatedProtocol)
 
-TODO`))
+	if err := backendServeConn(c, svc); err != nil {
+		tlsLog(c, "backend error: %v", err)
 	}
 }
 
@@ -72,11 +59,11 @@ func frontendTLSCertificate(ci *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	if ci.ServerName == "" {
 		return nil, fmt.Errorf("no SNI present in request")
 	}
-	c, ok := serviceMap[ci.ServerName]
+	svc, ok := serviceMap[ci.ServerName]
 	if !ok {
 		return nil, fmt.Errorf("server %q not configured", ci.ServerName)
 	}
-	return c.t, nil
+	return svc.cert, nil
 }
 
 func tlsServer(s net.Listener) {
