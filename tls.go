@@ -72,8 +72,7 @@ func frontendTLSCertificate(ci *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	if ci.ServerName == "" {
 		return nil, fmt.Errorf("no SNI present in request")
 	}
-	// TODO(bluecmd): Probably need a lock here
-	c, ok := certMap[ci.ServerName]
+	c, ok := serviceMap[ci.ServerName]
 	if !ok {
 		return nil, fmt.Errorf("server %q not configured", ci.ServerName)
 	}

@@ -10,12 +10,13 @@ import (
 	"time"
 
 	"github.com/bluecmd/fest/acme"
+	pb "github.com/bluecmd/fest/proto"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 var (
-	certMap      = map[string]*Certificate{}
+	serviceMap   = map[string]*Service{}
 	watcherPoker = make(chan struct{}, 1)
 
 	loadedCerts = promauto.NewGaugeVec(
@@ -34,8 +35,12 @@ var (
 	)
 )
 
-type Certificate struct {
+type Service struct {
 	t *tls.Certificate
+	// If nil, this is an auth domain
+	pb *pb.Service
+	// Used to cancel the scheduled renew operation
+	cancel chan bool
 }
 
 func pokeWatcher() {
@@ -71,13 +76,19 @@ func loadCert(domain string) (*tls.Certificate, error) {
 	return crt, nil
 }
 
-func scheduleRenew(domain string, c *Certificate) {
+func scheduleRenew(domain string, c *Service) {
 	for {
 		xc := c.t.Leaf
 		certExpires.WithLabelValues(domain).Set(float64(xc.NotAfter.Unix()))
 		expires := xc.NotAfter.Add(acme.LifetimePadding * -1)
 		log.Printf("Scheduling renewal for %q at %s", domain, expires)
-		time.Sleep(expires.Sub(time.Now()) + 10*time.Minute)
+
+		select {
+		case <-c.cancel:
+			return
+		case <-time.After(expires.Sub(time.Now()) + 10*time.Minute):
+			// continue
+		}
 		log.Printf("Renewal due for %q", domain)
 
 		nt, err := certManager.MaybeRenew(context.Background(), c.t)
@@ -118,18 +129,31 @@ func startWatcher() {
 		for {
 			<-watcherPoker
 			c := config
-			domains := []string{*authDomain}
-			for _, svc := range c.GetService() {
-				domains = append(domains, svc.GetName())
+			cm := map[string]*Service{}
+			_, ok := cm[*authDomain]
+			if !ok {
+				cm[*authDomain] = &Service{cancel: make(chan bool, 1)}
 			}
 
-			for _, domain := range domains {
-				tc, ok := certMap[domain]
+			for _, svc := range c.GetService() {
+				domain := svc.GetName()
+				tc, ok := cm[domain]
 				if !ok {
-					tc = &Certificate{}
-					certMap[domain] = tc
+					tc = &Service{cancel: make(chan bool, 1)}
+					cm[domain] = tc
 				}
+			}
 
+			// Copy certficiates if already loaded, and abort all renewals
+			for domain, tc := range serviceMap {
+				tc.cancel <- true
+				t, ok := cm[domain]
+				if ok {
+					t.t = tc.t
+				}
+			}
+
+			for domain, tc := range cm {
 				if tc.t == nil {
 					loadedCerts.WithLabelValues(domain).Set(0)
 					c, err := loadCert(domain)
@@ -140,11 +164,14 @@ func startWatcher() {
 					} else {
 						log.Printf("Successfully loaded certificate for %q", domain)
 						loadedCerts.WithLabelValues(domain).Set(1)
-						go scheduleRenew(domain, tc)
 					}
 					tc.t = c
 				}
+				if tc.t != nil {
+					go scheduleRenew(domain, tc)
+				}
 			}
+			serviceMap = cm
 		}
 	}()
 }
