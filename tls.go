@@ -3,8 +3,13 @@ package main
 import (
 	"crypto/tls"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"net"
+	"net/http"
+
+	"golang.org/x/net/http2"
 )
 
 func tlsLog(c net.Conn, format string, v ...interface{}) {
@@ -26,15 +31,29 @@ func tlsHandler(rc net.Conn) {
 		tlsLog(rc, "handshake failed: %v", err)
 		return
 	}
-	tlsLog(rc, "open")
+	tlsLog(rc, "open, protocol=%q", c.ConnectionState().NegotiatedProtocol)
 
 	// TODO: Actual backend code here
-	rc.Write([]byte(`
-HTTP/1.1 404 Not Found
-Content-Type: text/plain; charset=UTF-8
 
-TODO
-`))
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+	if c.ConnectionState().NegotiatedProtocol == "h2" {
+		// Do HTTP/2
+		s := &http2.Server{}
+		s.ServeConn(c, &http2.ServeConnOpts{
+			Handler: handler,
+		})
+	} else {
+		// Fallback to HTTP/1.1
+		go io.Copy(ioutil.Discard, c)
+		c.Write([]byte(`HTTP/1.1 404 Not Found
+Content-Type: text/plain; charset=UTF-8
+Content-Length: 4
+Connection: close
+
+TODO`))
+	}
 }
 
 func frontendTLSConfig(ci *tls.ClientHelloInfo) (*tls.Config, error) {
@@ -45,6 +64,7 @@ func frontendTLSConfig(ci *tls.ClientHelloInfo) (*tls.Config, error) {
 		GetCertificate:           frontendTLSCertificate,
 		MinVersion:               tls.VersionTLS12,
 		PreferServerCipherSuites: true,
+		NextProtos:               []string{"h2", "http/1.1"},
 	}, nil
 }
 

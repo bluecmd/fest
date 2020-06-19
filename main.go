@@ -23,6 +23,7 @@ var (
 	acmeDirectory = flag.String("acme_directory", "https://acme-staging-v02.api.letsencrypt.org/directory", "which ACME directory to register to")
 	acmeContact   = flag.String("acme_contact", "", "which contact to register ACME account to, e.g. mailto:operator@dns.domain")
 	configFile    = flag.String("config_file", "config.textpb", "path to configuration file")
+	authDomain    = flag.String("auth_domain", "", "domain to serve authentication pages from, e.g. fest.example.com")
 
 	config      *pb.Config
 	certManager *acme.Manager
@@ -79,6 +80,10 @@ func loadConfig(path string) (*pb.Config, error) {
 
 func main() {
 	flag.Parse()
+
+	if *authDomain == "" {
+		log.Fatalf("--auth_domain needs to be set")
+	}
 
 	log.Printf("")
 	log.Printf(`  ████████╗███████╗███████╗████████╗`)

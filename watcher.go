@@ -118,8 +118,12 @@ func startWatcher() {
 		for {
 			<-watcherPoker
 			c := config
+			domains := []string{*authDomain}
 			for _, svc := range c.GetService() {
-				domain := svc.GetName()
+				domains = append(domains, svc.GetName())
+			}
+
+			for _, domain := range domains {
 				tc, ok := certMap[domain]
 				if !ok {
 					tc = &Certificate{}
