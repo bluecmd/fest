@@ -31,7 +31,7 @@ var (
 func httpLog(r *http.Request, format string, v ...interface{}) {
 	s := fmt.Sprintf(format, v...)
 	l := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
-	log.Printf("HTTP %s -> %s, host=%s, method=%s, url=%q, %s", r.RemoteAddr, l, r.Host, r.Method, r.URL, s)
+	log.Printf("HTTP %s -> %s, host=%s, method=%s, path=%q, %s", r.RemoteAddr, l, r.Host, r.Method, r.URL.Path, s)
 }
 
 func httpHandler(w http.ResponseWriter, r *http.Request) {
@@ -45,6 +45,18 @@ func httpHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	svc, ok := serviceMap[r.Host]
+	if ok && svc.pb != nil {
+		fe := svc.pb.GetFrontend()
+		if fe.GetRedirectHttp() {
+			httpLog(r, "redirect-to-https")
+			u := *r.URL
+			u.Scheme = "https"
+			u.Host = r.Host
+			http.Redirect(w, r, u.String(), 301)
+			return
+		}
+	}
 	httpLog(r, "not-found")
 	http.NotFound(w, r)
 }
