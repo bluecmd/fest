@@ -1,19 +1,27 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 
 	pb "github.com/bluecmd/fest/proto"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/hpack"
 )
 
 var (
 	errDone = errors.New("done")
+
+	// Used to debug H2 frames
+	dumpH2 = false
 )
 
 // TODO(bluecmd): See https://github.com/golang/go/issues/36673 to make this easier
@@ -53,13 +61,80 @@ func backendServeConn(c *tls.Conn, svc *Service) error {
 		return fmt.Errorf("configuration missing")
 	}
 
-	// TODO(bluecmd): Implement authn and authz here.
-	// For connections that do not present a client certificate we will have to
-	// become a HTTP proxy for the first request in order to extract the
-	// authentication cookie.
-	// This will be a bit tricky.
+	user := ""
 
-	user := "<todo>"
+	cs := c.ConnectionState()
+	buf := &bytes.Buffer{}
+	tee := io.TeeReader(c, buf)
+
+	if len(cs.VerifiedChains) > 0 {
+		// TOOD(bluecmd): mTLS verification here
+		return fmt.Errorf("client cert authn not implemented")
+	} else {
+		// HTTP-cookie based authn.
+		// This requires the first frame to be a http1 or h2 header that presents
+		// a cookie header.
+		var cookies []string
+		if cs.NegotiatedProtocol == "h2" {
+			// Read h2 preface
+			preb := make([]byte, len(http2.ClientPreface))
+			if _, err := io.ReadFull(tee, preb); err != nil {
+				return err
+			} else if !bytes.Equal(preb, []byte(http2.ClientPreface)) {
+				return fmt.Errorf("invalid h2 preface %q", preb)
+			}
+			// Read h2 frame, expecting SETTINGS followed by HEADERS
+			fr := http2.NewFramer(c, tee)
+			fr.ReadMetaHeaders = hpack.NewDecoder(4096 /* initial table size */, nil)
+			// Write server preface as the empty settings frame
+			// NOTE: This is a bit shady.
+			// My testing shows that this is the only interactive thing we need to do
+			// as a server to make the client go "Cool, I'm going to send you everything
+			// and you can take your time to process it, m'kay?". My initial implementation
+			// of this ack'd SETTINGS frames and stuff, until HEADERS was seen - at which
+			// point the connections were glued together and some ACKs were dropped to
+			// not confuse the clients. Well, the clients (noteably cURL) were really
+			// confused about that. So I tried a few things, and it turns out the following
+			// seems to work pretty good. I.e., we only preface and then let the client
+			// send us all the data we need. If a client shows up that really wants
+			// us to ack the initial SETTINGS before sending the HEADERS, that client
+			// will not work with this code.
+			if err := fr.WriteSettings(); err != nil {
+				return err
+			}
+			for {
+				frm, err := fr.ReadFrame()
+				if err != nil {
+					return fmt.Errorf("failed to read h2 frame: %v", err)
+				}
+				if frm.Header().Type == http2.FrameHeaders {
+					hfrm := frm.(*http2.MetaHeadersFrame)
+					for _, f := range hfrm.Fields {
+						if f.Name == "cookie" {
+							cookies = []string{f.Value}
+							break
+						}
+					}
+					break
+				}
+				// ignore any other frames
+			}
+		} else {
+			// Read http1 frame
+			req, err := http.ReadRequest(bufio.NewReader(tee))
+			if err != nil {
+				return fmt.Errorf("failed to read initial http1 frame: %v", err)
+			}
+			cookies = req.Header["Cookie"]
+		}
+		log.Printf("DEBUG: HTTP Cookies %q", cookies)
+		user = "<todo>"
+	}
+
+	if user == "" {
+		panic("internal error: user validation returned no user")
+	}
+
 	tlsLog(c, "authz ok, principal=%q", user)
 
 	var bc net.Conn
@@ -73,11 +148,64 @@ func backendServeConn(c *tls.Conn, svc *Service) error {
 	if err != nil {
 		return err
 	}
-
 	defer bc.Close()
 
-	go io.Copy(bc, c)
-	io.Copy(c, bc)
+	return glue(buf, c, bc, c, bc)
+}
+
+// Glue together the backend and the client to the best of our ability
+func glue(hello, cIn, bcIn io.Reader, cOut, bcOut io.Writer) error {
+	if dumpH2 {
+		p1r, p1w := io.Pipe()
+		p2r, p2w := io.Pipe()
+		p3r, p3w := io.Pipe()
+		p4r, p4w := io.Pipe()
+		cIn = io.TeeReader(cIn, p1w)
+		bcIn = io.TeeReader(bcIn, p2w)
+		cOut = io.MultiWriter(cOut, p3w)
+		bcOut = io.MultiWriter(bcOut, p4w)
+		for _, r := range []struct {
+			r    io.Reader
+			skip int
+			s    string
+		}{
+			{p1r, 0, "client in"},
+			{p2r, 0, "backend in"},
+			{p3r, 0, "client out"},
+			{p4r, len(http2.ClientPreface), "backend out"},
+		} {
+			go func(r io.Reader, skip int, s string) {
+				fr := http2.NewFramer(ioutil.Discard, r)
+				io.CopyN(ioutil.Discard, r, int64(skip))
+				for {
+					frm, err := fr.ReadFrame()
+					if err != nil {
+						log.Printf("DEBUG %s: Frame read error: %v", s, err)
+						return
+					}
+					log.Printf("DEBUG %14s: %+v", s, frm)
+				}
+			}(r.r, r.skip, r.s)
+		}
+	}
+
+	// Copy whatever we have already read from the client straight to the backend
+	if _, err := io.Copy(bcOut, hello); err != nil {
+		return err
+	}
+
+	errc := make(chan error)
+
+	go func() {
+		_, err := io.Copy(cOut, bcIn)
+		errc <- err
+	}()
+	if _, err := io.Copy(bcOut, cIn); err != nil {
+		return fmt.Errorf("read from client: %v", err)
+	}
+	if err := <-errc; err != nil {
+		return fmt.Errorf("read from backend: %v", err)
+	}
 	return nil
 }
 
