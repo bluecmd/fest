@@ -50,41 +50,39 @@ func (l *singleConnListener) Addr() net.Addr {
 	return l.conn.LocalAddr()
 }
 
-func backendServeConn(c *tls.Conn, svc *Service) error {
-	if svc.pb == nil {
-		// This is not a user-defined service, so treat it as a authentication domain.
-		return authServeConn(c, svc)
-	}
-
-	be := svc.pb.GetBackend()
-	if be == nil {
-		return fmt.Errorf("configuration missing")
-	}
-
+func authConn(c *tls.Conn, in io.Reader) (string, error) {
 	user := ""
 
 	cs := c.ConnectionState()
-	buf := &bytes.Buffer{}
-	tee := io.TeeReader(c, buf)
 
 	if len(cs.VerifiedChains) > 0 {
 		// TOOD(bluecmd): mTLS verification here
-		return fmt.Errorf("client cert authn not implemented")
+		return "", fmt.Errorf("client cert authn not implemented")
 	} else {
 		// HTTP-cookie based authn.
 		// This requires the first frame to be a http1 or h2 header that presents
 		// a cookie header.
 		var cookies []string
-		if cs.NegotiatedProtocol == "h2" {
+
+		// While we have the hint in ALPN, sometimes HTTP/2 is being used without ALPN,
+		// notably gRPC. Look for the preface method PRI to see if this is HTTP/2.
+		f3b := make([]byte, 3)
+		if _, err := in.Read(f3b); err != nil {
+			return "", err
+		}
+
+		// Re-add the bytes
+		in = io.MultiReader(bytes.NewReader(f3b), in)
+		if cs.NegotiatedProtocol == "h2" || string(f3b) == "PRI" {
 			// Read h2 preface
 			preb := make([]byte, len(http2.ClientPreface))
-			if _, err := io.ReadFull(tee, preb); err != nil {
-				return err
+			if _, err := io.ReadFull(in, preb); err != nil {
+				return "", err
 			} else if !bytes.Equal(preb, []byte(http2.ClientPreface)) {
-				return fmt.Errorf("invalid h2 preface %q", preb)
+				return "", fmt.Errorf("invalid h2 preface %q", preb)
 			}
 			// Read h2 frame, expecting SETTINGS followed by HEADERS
-			fr := http2.NewFramer(c, tee)
+			fr := http2.NewFramer(c, in)
 			fr.ReadMetaHeaders = hpack.NewDecoder(4096 /* initial table size */, nil)
 			// Write server preface as the empty settings frame
 			// NOTE: This is a bit shady.
@@ -100,34 +98,44 @@ func backendServeConn(c *tls.Conn, svc *Service) error {
 			// us to ack the initial SETTINGS before sending the HEADERS, that client
 			// will not work with this code.
 			if err := fr.WriteSettings(); err != nil {
-				return err
+				return "", err
 			}
 			for {
 				frm, err := fr.ReadFrame()
 				if err != nil {
-					return fmt.Errorf("failed to read h2 frame: %v", err)
+					return "", fmt.Errorf("failed to read h2 frame: %v", err)
 				}
 				if frm.Header().Type == http2.FrameHeaders {
 					hfrm := frm.(*http2.MetaHeadersFrame)
+					method := ""
+					ct := ""
+					// TODO(bluecmd): For gRPC, any metadata set will end up as headers here.
+					// Looking at e.g. "content-type" = "application/grpc" and extracing some
+					// nice authn header might make for a good integration when not using mTLS certs.
 					for _, f := range hfrm.Fields {
-						if f.Name == "cookie" {
-							cookies = []string{f.Value}
-							break
+						if f.Name == ":method" {
+							method = f.Value
+						} else if f.Name == "cookie" {
+							cookies = append(cookies, f.Value)
+						} else if f.Name == "content-type" {
+							ct = f.Value
 						}
 					}
+					tlsLog(c, "h2 request, method=%q, content-type=%q", method, ct)
 					break
 				}
 				// ignore any other frames
 			}
 		} else {
 			// Read http1 frame
-			req, err := http.ReadRequest(bufio.NewReader(tee))
+			req, err := http.ReadRequest(bufio.NewReader(in))
 			if err != nil {
-				return fmt.Errorf("failed to read initial http1 frame: %v", err)
+				return "", fmt.Errorf("failed to read initial http1 frame: %v", err)
 			}
+			tlsLog(c, "http1.1 request, method=%q", req.Method)
 			cookies = req.Header["Cookie"]
 		}
-		log.Printf("DEBUG: HTTP Cookies %q", cookies)
+		tlsLog(c, "[debug] http cookies %q", cookies)
 		user = "<todo>"
 	}
 
@@ -135,12 +143,17 @@ func backendServeConn(c *tls.Conn, svc *Service) error {
 		panic("internal error: user validation returned no user")
 	}
 
-	tlsLog(c, "authz ok, principal=%q", user)
+	return user, nil
+}
 
+func backendServeConn(c *tls.Conn, hello io.Reader, pb *pb.Backend) error {
 	var bc net.Conn
 	var err error
-	if tls := be.GetTls(); tls != nil {
+
+	if tls := pb.GetTls(); tls != nil {
 		bc, err = newTLSBackendConn(tls, c.ConnectionState().NegotiatedProtocol)
+	} else if plain := pb.GetPlain(); plain != nil {
+		bc, err = newPlainBackendConn(plain, c.ConnectionState().NegotiatedProtocol)
 	} else {
 		return fmt.Errorf("type not implemented")
 	}
@@ -150,7 +163,7 @@ func backendServeConn(c *tls.Conn, svc *Service) error {
 	}
 	defer bc.Close()
 
-	return glue(buf, c, bc, c, bc)
+	return glue(hello, c, bc, c, bc)
 }
 
 // Glue together the backend and the client to the best of our ability
@@ -195,18 +208,22 @@ func glue(hello, cIn, bcIn io.Reader, cOut, bcOut io.Writer) error {
 	}
 
 	errc := make(chan error)
-
 	go func() {
 		_, err := io.Copy(cOut, bcIn)
 		errc <- err
 	}()
-	if _, err := io.Copy(bcOut, cIn); err != nil {
-		return fmt.Errorf("read from client: %v", err)
-	}
+	go func() {
+		_, err := io.Copy(bcOut, cIn)
+		errc <- err
+	}()
 	if err := <-errc; err != nil {
-		return fmt.Errorf("read from backend: %v", err)
+		return fmt.Errorf("read: %v", err)
 	}
 	return nil
+}
+
+func newPlainBackendConn(pb *pb.PlainBackend, alpn string) (net.Conn, error) {
+	return net.Dial("tcp", pb.GetEndpoint())
 }
 
 func newTLSBackendConn(pb *pb.TLSBackend, alpn string) (net.Conn, error) {

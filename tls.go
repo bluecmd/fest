@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log"
 	"net"
 
@@ -51,10 +53,28 @@ func tlsHandler(rc net.Conn) {
 
 	activeConns.WithLabelValues(cs.ServerName).Add(1)
 	defer activeConns.WithLabelValues(cs.ServerName).Sub(1)
-	tlsLog(c, "open, sni=%q, protocol=%q", cs.ServerName, cs.NegotiatedProtocol)
+	tlsLog(c, "open, sni=%q, alpn=%q", cs.ServerName, cs.NegotiatedProtocol)
 
-	if err := backendServeConn(c, svc); err != nil {
-		tlsLog(c, "backend error: %v", err)
+	buf := &bytes.Buffer{}
+	tee := io.TeeReader(c, buf)
+
+	if svc.pb == nil {
+		// This is not a user-defined service, so treat it as a authentication domain.
+		if err := authServeConn(c, svc); err != nil {
+			tlsLog(c, "auth error: %v", err)
+			return
+		}
+	}
+
+	user, err := authConn(c, tee)
+	if err != nil {
+		tlsLog(c, "auth error: %v", err)
+	}
+
+	tlsLog(c, "authz ok, principal=%q", user)
+
+	if err := backendServeConn(c, buf, svc.pb.GetBackend()); err != nil {
+		tlsLog(c, "serve error: %v", err)
 	}
 }
 
