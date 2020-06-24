@@ -97,8 +97,16 @@ func tlsHandler(rc net.Conn) {
 	}
 	l.Infof("authn ok, principal=%q, provider=%q", s.User, s.Provider)
 	if !authz(s, svc.pb.GetAuthorization()) {
-		l.Infof("authz failed, terminating")
-		return
+		if proto == Protocol_HTTP1 || proto == Protocol_HTTP2 {
+			l.Infof("authz failed, returning error")
+			if err := authzError(c, proto, svc); err != nil {
+				l.Infof("error page error: %v", err)
+				return
+			}
+		} else {
+			l.Infof("authz failed, terminating")
+			return
+		}
 	}
 	l.Infof("authz ok, principal=%q, provider=%q", s.User, s.Provider)
 	if err := backendServeConn(l, c, buf, svc.pb.GetBackend()); err != nil {

@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 
 	pb "github.com/bluecmd/fest/proto"
 	"golang.org/x/net/http2"
@@ -478,6 +479,30 @@ func redirectAuthn(c *tls.Conn, proto Protocol, svc *Service) error {
 		r.Header.Add("host", domain)
 		r.Header.Add("set-cookie", s.Cookie(domain))
 		r.Header.Add("location", ur.String())
+		r.Write(c)
+		return nil
+	}
+	return fmt.Errorf("unknown protocol specified (%v)", proto)
+}
+
+func authzError(c *tls.Conn, proto Protocol, svc *Service) error {
+	msg := "403 - user not authorized to this resource"
+	if proto == Protocol_HTTP2 {
+		// TODO(bluecmd): This should be easy enough to implement
+		return fmt.Errorf("http2 error page not implemented")
+	}
+	domain := svc.pb.GetName()
+	if proto == Protocol_HTTP1 {
+		r := &http.Response{
+			StatusCode: 403,
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+		}
+		r.Header = make(http.Header)
+		r.Header.Add("host", domain)
+		r.Header.Add("content-type", "text/plain")
+		r.ContentLength = int64(len(msg))
+		r.Body = ioutil.NopCloser(strings.NewReader(msg))
 		r.Write(c)
 		return nil
 	}
