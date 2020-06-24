@@ -11,7 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"strings"
+	"net/url"
 
 	pb "github.com/bluecmd/fest/proto"
 	"golang.org/x/net/http2"
@@ -20,6 +20,10 @@ import (
 
 const (
 	festCookie = "FestAuth"
+
+	Protocol_UNKNOWN Protocol = 0
+	Protocol_HTTP1   Protocol = 1
+	Protocol_HTTP2   Protocol = 2
 )
 
 var (
@@ -33,6 +37,8 @@ type Logger interface {
 	Infof(format string, v ...interface{})
 	Debugf(format string, v ...interface{})
 }
+
+type Protocol int
 
 // TODO(bluecmd): See https://github.com/golang/go/issues/36673 to make this easier
 type singleConnListener struct {
@@ -74,34 +80,27 @@ func extractCookie(cookies []string) (string, error) {
 	return c.Value, nil
 }
 
-func authz(user string, p pb.Provider, authz *pb.Authorization) bool {
+func authz(s *session, authz *pb.Authorization) bool {
 	for _, u := range authz.GetUser() {
-		if u.GetName() == user && u.GetProvider() == p {
+		if u.GetName() == s.User && u.Provider == s.Provider {
 			return true
 		}
 	}
 	return false
 }
 
-func parseAuthCookie(cookie string) (string, pb.Provider, error) {
-	// TODO(bluecmd): Real protected cookie goes here
-	parts := strings.SplitN(cookie, "/", 2)
-	if len(parts) != 2 {
-		return "", pb.Provider_UNKNOWN, fmt.Errorf("invalid cookie")
-	}
-
-	p, ok := pb.Provider_value[parts[0]]
-	if !ok {
-		return "", pb.Provider_UNKNOWN, fmt.Errorf("invalid provider %q", parts[0])
-	}
-	return parts[1], pb.Provider(p), nil
+func authErr(err error) (*session, Protocol, error) {
+	return nil, Protocol_UNKNOWN, err
 }
 
-func authConn(l Logger, cs tls.ConnectionState, in io.Reader) (string, pb.Provider, error) {
+func authConn(l Logger, cs tls.ConnectionState, in io.Reader) (*session, Protocol, error) {
 	if len(cs.VerifiedChains) > 0 {
 		// TOOD(bluecmd): mTLS verification here
-		return "", pb.Provider_UNKNOWN, fmt.Errorf("client cert authn not implemented")
+		// s := newEphemeralSession()
+		// defer s.Forget()
+		return authErr(fmt.Errorf("client cert authn not implemented"))
 	} else {
+		proto := Protocol_UNKNOWN
 		// HTTP-cookie based authn.
 		// This requires the first frame to be a http1 or h2 header that presents
 		// a cookie header.
@@ -111,7 +110,7 @@ func authConn(l Logger, cs tls.ConnectionState, in io.Reader) (string, pb.Provid
 		// notably gRPC. Look for the preface method PRI to see if this is HTTP/2.
 		f3b := make([]byte, 3)
 		if _, err := in.Read(f3b); err != nil {
-			return "", pb.Provider_UNKNOWN, err
+			return authErr(err)
 		}
 
 		// Re-add the bytes
@@ -120,9 +119,9 @@ func authConn(l Logger, cs tls.ConnectionState, in io.Reader) (string, pb.Provid
 			// Read h2 preface
 			preb := make([]byte, len(http2.ClientPreface))
 			if _, err := io.ReadFull(in, preb); err != nil {
-				return "", pb.Provider_UNKNOWN, err
+				return authErr(err)
 			} else if !bytes.Equal(preb, []byte(http2.ClientPreface)) {
-				return "", pb.Provider_UNKNOWN, fmt.Errorf("invalid h2 preface %q", preb)
+				return authErr(fmt.Errorf("invalid h2 preface %q", preb))
 			}
 			// Read h2 frame, expecting SETTINGS followed by HEADERS
 			fr := http2.NewFramer(ioutil.Discard, in)
@@ -141,12 +140,12 @@ func authConn(l Logger, cs tls.ConnectionState, in io.Reader) (string, pb.Provid
 			// us to ack the initial SETTINGS before sending the HEADERS, that client
 			// will not work with this code.
 			if err := fr.WriteSettings(); err != nil {
-				return "", pb.Provider_UNKNOWN, err
+				return authErr(err)
 			}
 			for {
 				frm, err := fr.ReadFrame()
 				if err != nil {
-					return "", pb.Provider_UNKNOWN, fmt.Errorf("failed to read h2 frame: %v", err)
+					return authErr(fmt.Errorf("failed to read h2 frame: %v", err))
 				}
 				if frm.Header().Type == http2.FrameHeaders {
 					hfrm := frm.(*http2.MetaHeadersFrame)
@@ -165,6 +164,7 @@ func authConn(l Logger, cs tls.ConnectionState, in io.Reader) (string, pb.Provid
 						}
 					}
 					l.Infof("h2 request, method=%q, content-type=%q", method, ct)
+					proto = Protocol_HTTP2
 					break
 				}
 				// ignore any other frames
@@ -173,22 +173,24 @@ func authConn(l Logger, cs tls.ConnectionState, in io.Reader) (string, pb.Provid
 			// Read http1 frame
 			req, err := http.ReadRequest(bufio.NewReader(in))
 			if err != nil {
-				return "", pb.Provider_UNKNOWN, fmt.Errorf("failed to read initial http1 frame: %v", err)
+				return authErr(fmt.Errorf("failed to read initial http1 frame: %v", err))
 			}
 			l.Infof("http1.1 request, method=%q", req.Method)
+			proto = Protocol_HTTP1
 			cookies = req.Header["Cookie"]
 		}
 
 		cookie, err := extractCookie(cookies)
 		if err == http.ErrNoCookie {
-			return "", pb.Provider_UNKNOWN, nil
+			return nil, proto, nil
 		} else if err != nil {
-			return "", pb.Provider_UNKNOWN, err
+			return authErr(err)
 		}
 
-		return parseAuthCookie(cookie)
+		s, err := validateSessionCookie(cookie)
+		return s, proto, err
 	}
-	return "", pb.Provider_UNKNOWN, fmt.Errorf("no auth logic for connection")
+	return authErr(fmt.Errorf("no auth logic for connection"))
 }
 
 func backendServeConn(l Logger, c *tls.Conn, hello io.Reader, pb *pb.Backend) error {
@@ -301,6 +303,73 @@ func authServeConn(c *tls.Conn, svc *Service) error {
 }
 
 func authHTTPHandler(w http.ResponseWriter, r *http.Request) {
-	authHttpLog(r, "not-found")
-	http.NotFound(w, r)
+	q := r.URL.Query()
+	eid := q.Get("eid")
+	if eid == "" {
+		authHttpLog(r, "session validation failed: no eid supplied")
+		http.NotFound(w, r)
+		return
+	}
+	nonce := q.Get("nonce")
+	if nonce == "" {
+		authHttpLog(r, "session validation failed: no nonce supplied")
+		http.NotFound(w, r)
+		return
+	}
+	cb := q.Get("callback")
+	if cb == "" {
+		authHttpLog(r, "session validation failed: no callback supplied")
+		http.NotFound(w, r)
+		return
+	}
+	s, err := validateEncryptedSessionID(eid, nonce)
+	if err != nil {
+		authHttpLog(r, "session validation failed: %v", err)
+		http.NotFound(w, r)
+		return
+	}
+	u := &url.URL{
+		Scheme: "https",
+		Host:   cb,
+	}
+	s.Callback = u.String()
+
+	// TODO: Real values from oauth2 flow here
+	s.User = "test"
+	s.Provider = pb.Provider_GITHUB
+
+	http.Redirect(w, r, s.Callback, 302)
+}
+
+func redirectAuthn(c *tls.Conn, proto Protocol, svc *Service) error {
+	if proto == Protocol_HTTP2 {
+		// TODO(bluecmd): This should be easy enough to implement
+		return fmt.Errorf("http2 redirect not implemented")
+	}
+	domain := svc.pb.GetName()
+	if proto == Protocol_HTTP1 {
+		r := &http.Response{
+			StatusCode: 302,
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+		}
+		ur := &url.URL{
+			Scheme: "https",
+			Host:   *authDomain,
+		}
+		s := newSession()
+		q := ur.Query()
+		eid, nonce := s.EncryptedID()
+		q["eid"] = []string{eid}
+		q["nonce"] = []string{nonce}
+		q["callback"] = []string{domain}
+		ur.RawQuery = q.Encode()
+		r.Header = make(http.Header)
+		r.Header.Add("host", domain)
+		r.Header.Add("set-cookie", s.Cookie(domain))
+		r.Header.Add("location", ur.String())
+		r.Write(c)
+		return nil
+	}
+	return fmt.Errorf("unknown protocol specified (%v)", proto)
 }

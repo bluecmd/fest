@@ -23,29 +23,30 @@ var (
 )
 
 type tlsLogger struct {
-	c net.Conn
+	c *tls.Conn
 }
 
 func (l *tlsLogger) Infof(format string, v ...interface{}) {
 	s := fmt.Sprintf(format, v...)
-	log.Printf("TLS %s -> %s, %s", l.c.RemoteAddr(), l.c.LocalAddr(), s)
+	cs := l.c.ConnectionState()
+	var pre string
+	if cs.ServerName != "" {
+		pre = fmt.Sprintf("TLS[sni=%q]", cs.ServerName)
+	} else {
+		pre = fmt.Sprintf("TLS")
+	}
+	log.Printf("%s %s -> %s, %s", pre, l.c.RemoteAddr(), l.c.LocalAddr(), s)
 }
 
 func (l *tlsLogger) Debugf(format string, v ...interface{}) {
-	s := fmt.Sprintf(format, v...)
-	log.Printf("TLS %s -> %s, [DEBUG] %s", l.c.RemoteAddr(), l.c.LocalAddr(), s)
+	l.Infof(fmt.Sprintf("[DEBUG] %s", format), v...)
 }
 
 func tlsHandler(rc net.Conn) {
 	defer rc.Close()
-	l := &tlsLogger{rc}
+	c := rc.(*tls.Conn)
+	l := &tlsLogger{c}
 	defer l.Infof("close")
-
-	c, ok := rc.(*tls.Conn)
-	if !ok {
-		l.Infof("handshake failed: not TLS connection")
-		return
-	}
 
 	l.Infof("handshake")
 
@@ -63,7 +64,7 @@ func tlsHandler(rc net.Conn) {
 
 	activeConns.WithLabelValues(cs.ServerName).Add(1)
 	defer activeConns.WithLabelValues(cs.ServerName).Sub(1)
-	l.Infof("open, sni=%q, alpn=%q", cs.ServerName, cs.NegotiatedProtocol)
+	l.Infof("open, alpn=%q", cs.NegotiatedProtocol)
 
 	buf := &bytes.Buffer{}
 	tee := io.TeeReader(c, buf)
@@ -74,23 +75,32 @@ func tlsHandler(rc net.Conn) {
 			l.Infof("auth error: %v", err)
 			return
 		}
+		return
 	}
 
-	user, provider, err := authConn(l, c.ConnectionState(), tee)
+	s, proto, err := authConn(l, c.ConnectionState(), tee)
 	if err != nil {
 		l.Infof("auth error: %v", err)
 	}
-
-	if user == "" {
-		l.Infof("no auth, terminating")
-		return
+	if s == nil || s.User == "" {
+		if proto == Protocol_HTTP1 || proto == Protocol_HTTP2 {
+			l.Infof("no auth, redirecting")
+			if err := redirectAuthn(c, proto, svc); err != nil {
+				l.Infof("redirect error: %v", err)
+				return
+			}
+			return
+		} else {
+			l.Infof("no auth, terminating")
+			return
+		}
 	}
-	l.Infof("authn ok, principal=%q, provider=%q", user, provider)
-	if !authz(user, provider, svc.pb.GetAuthorization()) {
+	l.Infof("authn ok, principal=%q, provider=%q", s.User, s.Provider)
+	if !authz(s, svc.pb.GetAuthorization()) {
 		l.Infof("authz failed, terminating")
 		return
 	}
-	l.Infof("authz ok, principal=%q", user)
+	l.Infof("authz ok, principal=%q, provider=%q", s.User, s.Provider)
 	if err := backendServeConn(l, c, buf, svc.pb.GetBackend()); err != nil {
 		l.Infof("serve error: %v", err)
 	}
