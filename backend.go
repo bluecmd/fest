@@ -11,10 +11,15 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 
 	pb "github.com/bluecmd/fest/proto"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
+)
+
+const (
+	festCookie = "FestAuth"
 )
 
 var (
@@ -23,6 +28,11 @@ var (
 	// Used to debug H2 frames
 	dumpH2 = false
 )
+
+type Logger interface {
+	Infof(format string, v ...interface{})
+	Debugf(format string, v ...interface{})
+}
 
 // TODO(bluecmd): See https://github.com/golang/go/issues/36673 to make this easier
 type singleConnListener struct {
@@ -50,14 +60,47 @@ func (l *singleConnListener) Addr() net.Addr {
 	return l.conn.LocalAddr()
 }
 
-func authConn(c *tls.Conn, in io.Reader) (string, error) {
-	user := ""
+func extractCookie(cookies []string) (string, error) {
+	header := http.Header{}
+	for _, v := range cookies {
+		header.Add("Cookie", v)
+	}
+	r := http.Request{Header: header}
 
-	cs := c.ConnectionState()
+	c, err := r.Cookie(festCookie)
+	if err != nil {
+		return "", err
+	}
+	return c.Value, nil
+}
 
+func authz(user string, p pb.Provider, authz *pb.Authorization) bool {
+	for _, u := range authz.GetUser() {
+		if u.GetName() == user && u.GetProvider() == p {
+			return true
+		}
+	}
+	return false
+}
+
+func parseAuthCookie(cookie string) (string, pb.Provider, error) {
+	// TODO(bluecmd): Real protected cookie goes here
+	parts := strings.SplitN(cookie, "/", 2)
+	if len(parts) != 2 {
+		return "", pb.Provider_UNKNOWN, fmt.Errorf("invalid cookie")
+	}
+
+	p, ok := pb.Provider_value[parts[0]]
+	if !ok {
+		return "", pb.Provider_UNKNOWN, fmt.Errorf("invalid provider %q", parts[0])
+	}
+	return parts[1], pb.Provider(p), nil
+}
+
+func authConn(l Logger, cs tls.ConnectionState, in io.Reader) (string, pb.Provider, error) {
 	if len(cs.VerifiedChains) > 0 {
 		// TOOD(bluecmd): mTLS verification here
-		return "", fmt.Errorf("client cert authn not implemented")
+		return "", pb.Provider_UNKNOWN, fmt.Errorf("client cert authn not implemented")
 	} else {
 		// HTTP-cookie based authn.
 		// This requires the first frame to be a http1 or h2 header that presents
@@ -68,7 +111,7 @@ func authConn(c *tls.Conn, in io.Reader) (string, error) {
 		// notably gRPC. Look for the preface method PRI to see if this is HTTP/2.
 		f3b := make([]byte, 3)
 		if _, err := in.Read(f3b); err != nil {
-			return "", err
+			return "", pb.Provider_UNKNOWN, err
 		}
 
 		// Re-add the bytes
@@ -77,12 +120,12 @@ func authConn(c *tls.Conn, in io.Reader) (string, error) {
 			// Read h2 preface
 			preb := make([]byte, len(http2.ClientPreface))
 			if _, err := io.ReadFull(in, preb); err != nil {
-				return "", err
+				return "", pb.Provider_UNKNOWN, err
 			} else if !bytes.Equal(preb, []byte(http2.ClientPreface)) {
-				return "", fmt.Errorf("invalid h2 preface %q", preb)
+				return "", pb.Provider_UNKNOWN, fmt.Errorf("invalid h2 preface %q", preb)
 			}
 			// Read h2 frame, expecting SETTINGS followed by HEADERS
-			fr := http2.NewFramer(c, in)
+			fr := http2.NewFramer(ioutil.Discard, in)
 			fr.ReadMetaHeaders = hpack.NewDecoder(4096 /* initial table size */, nil)
 			// Write server preface as the empty settings frame
 			// NOTE: This is a bit shady.
@@ -98,12 +141,12 @@ func authConn(c *tls.Conn, in io.Reader) (string, error) {
 			// us to ack the initial SETTINGS before sending the HEADERS, that client
 			// will not work with this code.
 			if err := fr.WriteSettings(); err != nil {
-				return "", err
+				return "", pb.Provider_UNKNOWN, err
 			}
 			for {
 				frm, err := fr.ReadFrame()
 				if err != nil {
-					return "", fmt.Errorf("failed to read h2 frame: %v", err)
+					return "", pb.Provider_UNKNOWN, fmt.Errorf("failed to read h2 frame: %v", err)
 				}
 				if frm.Header().Type == http2.FrameHeaders {
 					hfrm := frm.(*http2.MetaHeadersFrame)
@@ -121,7 +164,7 @@ func authConn(c *tls.Conn, in io.Reader) (string, error) {
 							ct = f.Value
 						}
 					}
-					tlsLog(c, "h2 request, method=%q, content-type=%q", method, ct)
+					l.Infof("h2 request, method=%q, content-type=%q", method, ct)
 					break
 				}
 				// ignore any other frames
@@ -130,23 +173,25 @@ func authConn(c *tls.Conn, in io.Reader) (string, error) {
 			// Read http1 frame
 			req, err := http.ReadRequest(bufio.NewReader(in))
 			if err != nil {
-				return "", fmt.Errorf("failed to read initial http1 frame: %v", err)
+				return "", pb.Provider_UNKNOWN, fmt.Errorf("failed to read initial http1 frame: %v", err)
 			}
-			tlsLog(c, "http1.1 request, method=%q", req.Method)
+			l.Infof("http1.1 request, method=%q", req.Method)
 			cookies = req.Header["Cookie"]
 		}
-		tlsLog(c, "[debug] http cookies %q", cookies)
-		user = "<todo>"
-	}
 
-	if user == "" {
-		panic("internal error: user validation returned no user")
-	}
+		cookie, err := extractCookie(cookies)
+		if err == http.ErrNoCookie {
+			return "", pb.Provider_UNKNOWN, nil
+		} else if err != nil {
+			return "", pb.Provider_UNKNOWN, err
+		}
 
-	return user, nil
+		return parseAuthCookie(cookie)
+	}
+	return "", pb.Provider_UNKNOWN, fmt.Errorf("no auth logic for connection")
 }
 
-func backendServeConn(c *tls.Conn, hello io.Reader, pb *pb.Backend) error {
+func backendServeConn(l Logger, c *tls.Conn, hello io.Reader, pb *pb.Backend) error {
 	var bc net.Conn
 	var err error
 
@@ -163,11 +208,11 @@ func backendServeConn(c *tls.Conn, hello io.Reader, pb *pb.Backend) error {
 	}
 	defer bc.Close()
 
-	return glue(hello, c, bc, c, bc)
+	return glue(l, hello, c, bc, c, bc)
 }
 
 // Glue together the backend and the client to the best of our ability
-func glue(hello, cIn, bcIn io.Reader, cOut, bcOut io.Writer) error {
+func glue(l Logger, hello, cIn, bcIn io.Reader, cOut, bcOut io.Writer) error {
 	if dumpH2 {
 		p1r, p1w := io.Pipe()
 		p2r, p2w := io.Pipe()
@@ -193,10 +238,10 @@ func glue(hello, cIn, bcIn io.Reader, cOut, bcOut io.Writer) error {
 				for {
 					frm, err := fr.ReadFrame()
 					if err != nil {
-						log.Printf("DEBUG %s: Frame read error: %v", s, err)
+						l.Debugf("%s: Frame read error: %v", s, err)
 						return
 					}
-					log.Printf("DEBUG %14s: %+v", s, frm)
+					l.Debugf("%14s: %+v", s, frm)
 				}
 			}(r.r, r.skip, r.s)
 		}

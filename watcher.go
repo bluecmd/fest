@@ -143,14 +143,28 @@ func startWatcher() {
 
 			for _, svc := range c.GetService() {
 				domain := svc.GetName()
-				tc, ok := cm[domain]
-				if !ok {
-					tc = &Service{
-						pb:     svc,
-						cancel: make(chan bool, 1),
-					}
-					cm[domain] = tc
+				_, ok := cm[domain]
+				if ok {
+					log.Printf("WARNING: Duplicate service %q found, using the first one", domain)
+					continue
 				}
+				if svc.GetBackend() == nil {
+					log.Printf("WARNING: Service %q not defining a backend, ignoring", domain)
+					continue
+				}
+				if svc.GetAuthentication() == nil {
+					log.Printf("WARNING: Service %q not defining authentication, ignoring", domain)
+					continue
+				}
+				if svc.GetAuthorization() == nil {
+					log.Printf("WARNING: Service %q not defining authorization, ignoring", domain)
+					continue
+				}
+				tc := &Service{
+					pb:     svc,
+					cancel: make(chan bool, 1),
+				}
+				cm[domain] = tc
 			}
 
 			// Copy certficiates if already loaded, and abort all renewals

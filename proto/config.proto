@@ -4,16 +4,17 @@ option go_package = "github.com/bluecmd/fest/proto";
 
 package fest;
 
+enum Provider {
+  UNKNOWN = 0;
+  GOOGLE = 1;
+  GITHUB = 2;
+  U2F = 3;
+}
+
 message AuthzUser {
   string name = 1;
 
-  enum Provider {
-    UNKNOWN = 0;
-    GOOGLE = 1;
-    GITHUB = 2;
-    U2F = 3;
-  }
-  Provider provider = 2;
+ Provider provider = 2;
 }
 
 message Authorization {

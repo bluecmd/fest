@@ -22,38 +22,48 @@ var (
 	)
 )
 
-func tlsLog(c net.Conn, format string, v ...interface{}) {
+type tlsLogger struct {
+	c net.Conn
+}
+
+func (l *tlsLogger) Infof(format string, v ...interface{}) {
 	s := fmt.Sprintf(format, v...)
-	log.Printf("TLS %s -> %s, %s", c.RemoteAddr(), c.LocalAddr(), s)
+	log.Printf("TLS %s -> %s, %s", l.c.RemoteAddr(), l.c.LocalAddr(), s)
+}
+
+func (l *tlsLogger) Debugf(format string, v ...interface{}) {
+	s := fmt.Sprintf(format, v...)
+	log.Printf("TLS %s -> %s, [DEBUG] %s", l.c.RemoteAddr(), l.c.LocalAddr(), s)
 }
 
 func tlsHandler(rc net.Conn) {
 	defer rc.Close()
-	defer tlsLog(rc, "close")
+	l := &tlsLogger{rc}
+	defer l.Infof("close")
 
 	c, ok := rc.(*tls.Conn)
 	if !ok {
-		tlsLog(rc, "handshake failed: not TLS connection")
+		l.Infof("handshake failed: not TLS connection")
 		return
 	}
 
-	tlsLog(c, "handshake")
+	l.Infof("handshake")
 
 	if err := c.Handshake(); err != nil {
-		tlsLog(c, "handshake failed: %v", err)
+		l.Infof("handshake failed: %v", err)
 		return
 	}
 
 	cs := c.ConnectionState()
 	svc, ok := serviceMap[cs.ServerName]
 	if !ok {
-		tlsLog(c, "handshake failed: server %q not known", cs.ServerName)
+		l.Infof("handshake failed: server %q not known", cs.ServerName)
 		return
 	}
 
 	activeConns.WithLabelValues(cs.ServerName).Add(1)
 	defer activeConns.WithLabelValues(cs.ServerName).Sub(1)
-	tlsLog(c, "open, sni=%q, alpn=%q", cs.ServerName, cs.NegotiatedProtocol)
+	l.Infof("open, sni=%q, alpn=%q", cs.ServerName, cs.NegotiatedProtocol)
 
 	buf := &bytes.Buffer{}
 	tee := io.TeeReader(c, buf)
@@ -61,20 +71,28 @@ func tlsHandler(rc net.Conn) {
 	if svc.pb == nil {
 		// This is not a user-defined service, so treat it as a authentication domain.
 		if err := authServeConn(c, svc); err != nil {
-			tlsLog(c, "auth error: %v", err)
+			l.Infof("auth error: %v", err)
 			return
 		}
 	}
 
-	user, err := authConn(c, tee)
+	user, provider, err := authConn(l, c.ConnectionState(), tee)
 	if err != nil {
-		tlsLog(c, "auth error: %v", err)
+		l.Infof("auth error: %v", err)
 	}
 
-	tlsLog(c, "authz ok, principal=%q", user)
-
-	if err := backendServeConn(c, buf, svc.pb.GetBackend()); err != nil {
-		tlsLog(c, "serve error: %v", err)
+	if user == "" {
+		l.Infof("no auth, terminating")
+		return
+	}
+	l.Infof("authn ok, principal=%q, provider=%q", user, provider)
+	if !authz(user, provider, svc.pb.GetAuthorization()) {
+		l.Infof("authz failed, terminating")
+		return
+	}
+	l.Infof("authz ok, principal=%q", user)
+	if err := backendServeConn(l, c, buf, svc.pb.GetBackend()); err != nil {
+		l.Infof("serve error: %v", err)
 	}
 }
 
