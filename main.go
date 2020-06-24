@@ -103,6 +103,8 @@ func main() {
 		log.Fatalf("Prometheus Metrics endpoint failed: %v", http.ListenAndServe("[::]:9723", nil))
 	}()
 
+	initSessionStore()
+
 	certManager = startACMEManager()
 
 	c := make(chan os.Signal, 1)

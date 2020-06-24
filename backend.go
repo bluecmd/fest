@@ -3,7 +3,10 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +19,8 @@ import (
 	pb "github.com/bluecmd/fest/proto"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/github"
 )
 
 const (
@@ -303,6 +308,10 @@ func authServeConn(c *tls.Conn, svc *Service) error {
 }
 
 func authHTTPHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		authCallback(w, r)
+		return
+	}
 	q := r.URL.Query()
 	eid := q.Get("eid")
 	if eid == "" {
@@ -334,11 +343,112 @@ func authHTTPHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Callback = u.String()
 
-	// TODO: Real values from oauth2 flow here
-	s.User = "test"
-	s.Provider = pb.Provider_GITHUB
+	initOauth(w, s)
+}
 
-	http.Redirect(w, r, s.Callback, 302)
+func initOauth(w http.ResponseWriter, s *session) {
+	sdata := make([]byte, 4)
+	if _, err := io.ReadFull(rand.Reader, sdata); err != nil {
+		panic(fmt.Sprintf("failed to read entropy: %v", err))
+	}
+	state := hex.EncodeToString(sdata)
+
+	oa := &oauth2.Config{
+		ClientID:     "00000000000000000000",
+		ClientSecret: "0000000000000000000000000000000000000000",
+		RedirectURL:  "https://               /github/",
+		Endpoint:     github.Endpoint,
+	}
+
+	// Save the state in a cookie that we can retrieve after the Oauth is complete.
+	// Use a generated suffix to allow multiple sessions to be authed at the same time.
+	sc := fmt.Sprintf("%s-%s=%s; Domain=%s; Secure; Max-Age=300", festCookie, state, s.ID(), *authDomain)
+	h := w.Header()
+	h["host"] = []string{*authDomain}
+	h["set-cookie"] = []string{sc}
+	h["location"] = []string{oa.AuthCodeURL(state)}
+	w.WriteHeader(302)
+}
+
+func authCallback(w http.ResponseWriter, r *http.Request) {
+	oa := &oauth2.Config{
+		ClientID:     "00000000000000000000",
+		ClientSecret: "0000000000000000000000000000000000000000",
+		RedirectURL:  "https://               /github/",
+		Endpoint:     github.Endpoint,
+	}
+	q := r.URL.Query()
+	code := q.Get("code")
+	if code == "" {
+		authHttpLog(r, "oauth callback failed: no code supplied")
+		http.NotFound(w, r)
+		return
+	}
+
+	state := q.Get("state")
+	if state == "" {
+		authHttpLog(r, "oauth callback failed: no state supplied")
+		http.NotFound(w, r)
+		return
+	}
+
+	var s *session
+	for _, cookie := range r.Cookies() {
+		if cookie.Name == fmt.Sprintf("%s-%s", festCookie, state) {
+			var err error
+			s, err = validateSessionCookie(cookie.Value)
+			if err != nil {
+				authHttpLog(r, "oauth callback failed: session invalid: %v", err)
+				http.NotFound(w, r)
+				return
+			}
+		}
+	}
+
+	tok, err := oa.Exchange(oauth2.NoContext, code)
+	if err != nil {
+		authHttpLog(r, "oauth exchange failed: %v", err)
+		http.NotFound(w, r)
+		return
+	}
+
+	client := oa.Client(oauth2.NoContext, tok)
+	o, err := client.Get("https://api.github.com/user")
+	if err != nil {
+		authHttpLog(r, "oauth interrogation failed: %v", err)
+		http.NotFound(w, r)
+		return
+	}
+	defer o.Body.Close()
+	data, err := ioutil.ReadAll(o.Body)
+	if err != nil {
+		authHttpLog(r, "oauth interrogation failed: %v", err)
+		http.NotFound(w, r)
+		return
+	}
+
+	type User struct {
+		Login string
+	}
+	var user User
+
+	err = json.Unmarshal(data, &user)
+	if err != nil {
+		authHttpLog(r, "oauth interrogation failed: json decode: %v", err)
+		http.NotFound(w, r)
+		return
+	}
+
+	s.User = user.Login
+	s.Provider = pb.Provider_GITHUB
+	authHttpLog(r, "oauth completed for user=%q, provider=%q", s.User, s.Provider)
+
+	sc := fmt.Sprintf("%s-%s=; Domain=%s; Secure; Expires=Thu, 01 Jan 1970 00:00:00 GMT", festCookie, state, *authDomain)
+	h := w.Header()
+	h["host"] = []string{*authDomain}
+	h["set-cookie"] = []string{sc}
+	h["location"] = []string{s.Callback}
+	w.WriteHeader(302)
 }
 
 func redirectAuthn(c *tls.Conn, proto Protocol, svc *Service) error {

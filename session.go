@@ -124,6 +124,10 @@ func validateEncryptedSessionID(id string, nonce string) (*session, error) {
 	return validateSession(idb)
 }
 
+func (s *session) ID() string {
+	return base64.URLEncoding.EncodeToString(s.id[:])
+}
+
 func (s *session) Cookie(domain string) string {
 	age := int(s.exp.Sub(time.Now()).Seconds())
 	id := base64.URLEncoding.EncodeToString(s.id[:])
