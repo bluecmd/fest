@@ -105,3 +105,13 @@ definitions without having to do a pre-build step in Go.
 FEST is tested to run fine behind Cloudflare as DDoS protection. Cloudflare
 does not support HTTP/2 or pure TLS connections, at least in the free tier,
 but other than things should Just Work (TM).
+
+## Tests?
+
+Paraphrasing a world leader:
+
+> If you test, you find bugs. If you don't test, no bugs.
+
+Serious answer: Right now, none - I wanted to focus my time on getting
+something to work first. Things will need to be refactored anyway,
+which likely will be given tests at that point.
