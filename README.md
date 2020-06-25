@@ -7,6 +7,25 @@ as well as secure user management.
 It is meant to be a opinionated proxy to make it easy to put service interfaces
 directly on the Internet, removing the need to use VPNs.
 
+## Features
+
+Currently supported:
+
+ * :heavy_check_mark: RFC 8555 ACME / Let's Encrypt integration
+ * :heavy_check_mark: Support being behind DDoS protection
+ * :heavy_check_mark: HTTP/2 support
+ * :heavy_check_mark: Github OAuth2 support 
+ * :heavy_check_mark: Prometheus metrics
+
+ Planned: 
+ 
+ * :x: Credentials forwarding (SSO)
+ * :x: U2F authentication
+ * :x: Google OAuth2 support
+ * :x: Backend plugins to allow for things like
+   * :x: Remote Desktop Protocol (RDP) via RD Gateway
+   * :x: VMware Remote Console (the stand-alone client) pass-through
+ 
 ## Usage
 
 FEST is configured using two madatory sources: command line flags and
@@ -37,10 +56,10 @@ it easy for hobbists and small organizations to not need to use VPNs to access
 internal services. The commercial options such as Cloudflare Access can be
 too expensive or limited for individual use.
 
-### TLS
+### TLS Certificate Management
 
-TLS is implemeted using RFC 8555 ACME protocol. This allows usage of e.g.
-Lets Encrypt automatic certificate management.
+TLS certificate management is implemeted using RFC 8555 ACME protocol.
+This allows usage of e.g. Lets Encrypt automatic certificate management.
 
 ### User Authentication
 
