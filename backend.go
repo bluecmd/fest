@@ -306,7 +306,7 @@ type httpBackendResponseWriter struct {
 }
 
 func (bw *httpBackendResponseWriter) WriteHeader(code int) {
-	bw.log.Infof("response from http backend: %d, %+v", code, bw.hdrs)
+	bw.log.Infof("response from http backend: %d", code)
 	bw.client.Write([]byte(fmt.Sprintf("HTTP/1.1 %d %s\r\n", code, http.StatusText(code))))
 	bw.hdrs.Write(bw.client)
 	bw.client.Write([]byte("\r\n"))
