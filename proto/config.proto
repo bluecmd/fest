@@ -54,7 +54,13 @@ message TLSBackend {
 }
 
 message HTTPBackend {
-  string endpoint = 1;
+  string target = 1;
+
+  // If set to true, any TLS validation will be ingored towards the backend.
+  bool skip_verify = 2;
+
+  // X.509 certificate, PEM encoded, to trust for connections to the backend.
+  repeated string trust = 3;
 }
 
 message Backend {
@@ -64,7 +70,7 @@ message Backend {
   // Enable this for backends that are over TLS.
   TLSBackend tls = 2;
 
-  // Enable this for backends that are over unencrypted HTTP/1.1.
+  // Enable this for backends that are over HTTP/1.1.
   HTTPBackend http = 3;
 }
 

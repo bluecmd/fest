@@ -14,8 +14,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"strings"
+	"time"
 
 	pb "github.com/bluecmd/fest/proto"
 	"golang.org/x/net/http2"
@@ -25,15 +27,14 @@ import (
 )
 
 const (
-	festCookie = "FestAuth"
-
 	Protocol_UNKNOWN Protocol = 0
 	Protocol_HTTP1   Protocol = 1
 	Protocol_HTTP2   Protocol = 2
 )
 
 var (
-	errDone = errors.New("done")
+	festCookie = "FestAuth-"
+	errDone    = errors.New("done")
 
 	// Used to debug H2 frames
 	dumpH2 = false
@@ -200,10 +201,10 @@ func authConn(l Logger, cs tls.ConnectionState, in io.Reader) (*session, Protoco
 }
 
 type backend interface {
-	Serve(l Logger, c *tls.Conn, hello io.Reader) error
+	Serve(l Logger, c *tls.Conn, hello io.Reader, s *session) error
 }
 
-func backendServeConn(l Logger, c *tls.Conn, hello io.Reader, pb *pb.Backend) error {
+func backendServeConn(l Logger, c *tls.Conn, hello io.Reader, pb *pb.Backend, s *session) error {
 	var bc backend
 	var err error
 
@@ -220,7 +221,7 @@ func backendServeConn(l Logger, c *tls.Conn, hello io.Reader, pb *pb.Backend) er
 	if err != nil {
 		return err
 	}
-	return bc.Serve(l, c, hello)
+	return bc.Serve(l, c, hello, s)
 }
 
 // Glue together the backend and the client to the best of our ability
@@ -291,26 +292,74 @@ func newPlainBackendConn(pb *pb.PlainBackend) (*plainBackend, error) {
 	return &plainBackend{conn: conn}, nil
 }
 
-func (b *plainBackend) Serve(l Logger, c *tls.Conn, hello io.Reader) error {
+func (b *plainBackend) Serve(l Logger, c *tls.Conn, hello io.Reader, s *session) error {
 	defer b.conn.Close()
 	return glue(l, hello, c, b.conn, c, b.conn)
+}
+
+type httpBackendResponseWriter struct {
+	log     Logger
+	client  net.Conn
+	backend net.Conn
+	hdrs    http.Header
+	wh      bool
+}
+
+func (bw *httpBackendResponseWriter) WriteHeader(code int) {
+	bw.log.Infof("response from http backend: %d, %+v", code, bw.hdrs)
+	bw.client.Write([]byte(fmt.Sprintf("HTTP/1.1 %d %s\r\n", code, http.StatusText(code))))
+	bw.hdrs.Write(bw.client)
+	bw.client.Write([]byte("\r\n"))
+	bw.wh = true
+}
+
+func (bw *httpBackendResponseWriter) Write(p []byte) (int, error) {
+	if !bw.wh {
+		bw.WriteHeader(http.StatusOK)
+	}
+	return bw.client.Write(p)
+}
+
+func (bw *httpBackendResponseWriter) Header() http.Header {
+	if bw.hdrs == nil {
+		bw.hdrs = http.Header{}
+		bw.hdrs.Add("Proxied-Via", "fest")
+	}
+	return bw.hdrs
 }
 
 type httpBackend struct {
-	conn net.Conn
+	rp *httputil.ReverseProxy
 }
 
 func newHTTPBackendConn(pb *pb.HTTPBackend) (*httpBackend, error) {
-	conn, err := net.Dial("tcp", pb.GetEndpoint())
+	u, err := url.Parse(pb.GetTarget())
 	if err != nil {
 		return nil, err
 	}
-	return &httpBackend{conn: conn}, nil
+	return &httpBackend{httputil.NewSingleHostReverseProxy(u)}, nil
 }
 
-func (b *httpBackend) Serve(l Logger, c *tls.Conn, hello io.Reader) error {
-	defer b.conn.Close()
-	return glue(l, hello, c, b.conn, c, b.conn)
+func (b *httpBackend) Serve(l Logger, c *tls.Conn, hello io.Reader, s *session) error {
+	in := io.MultiReader(hello, c)
+	for {
+		req, err := http.ReadRequest(bufio.NewReader(in))
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return fmt.Errorf("failed to read http1 frame: %v", err)
+		}
+		l.Infof("http1.1 backend request, method=%q", req.Method)
+		rw := &httpBackendResponseWriter{log: l, client: c}
+		req.Header.Add("Fest-User", s.User)
+		req.Header.Add("Fest-Provider", s.Provider.String())
+		b.rp.ServeHTTP(rw, req)
+		l.Infof("http1.1 backend request done")
+		// TODO: Keep-alive session management
+		break
+	}
+	return nil
 }
 
 type tlsBackend struct {
@@ -332,7 +381,7 @@ func newTLSBackendConn(pb *pb.TLSBackend, alpn string) (*tlsBackend, error) {
 	return &tlsBackend{conn: conn}, nil
 }
 
-func (b *tlsBackend) Serve(l Logger, c *tls.Conn, hello io.Reader) error {
+func (b *tlsBackend) Serve(l Logger, c *tls.Conn, hello io.Reader, s *session) error {
 	defer b.conn.Close()
 	return glue(l, hello, c, b.conn, c, b.conn)
 }
@@ -404,7 +453,7 @@ func initOauth(w http.ResponseWriter, s *session) {
 	oa := &oauth2.Config{
 		ClientID:     "00000000000000000000",
 		ClientSecret: "0000000000000000000000000000000000000000",
-		RedirectURL:  "https://               /github/",
+		RedirectURL:  "https://                 /github/",
 		Endpoint:     github.Endpoint,
 	}
 
@@ -422,7 +471,7 @@ func authCallback(w http.ResponseWriter, r *http.Request) {
 	oa := &oauth2.Config{
 		ClientID:     "00000000000000000000",
 		ClientSecret: "0000000000000000000000000000000000000000",
-		RedirectURL:  "https://               /github/",
+		RedirectURL:  "https://                 /github/",
 		Endpoint:     github.Endpoint,
 	}
 	q := r.URL.Query()
@@ -554,4 +603,8 @@ func authzError(c *tls.Conn, proto Protocol, svc *Service) error {
 		return nil
 	}
 	return fmt.Errorf("unknown protocol specified (%v)", proto)
+}
+
+func init() {
+	festCookie = festCookie + fmt.Sprintf("%x", time.Now().Unix())
 }
