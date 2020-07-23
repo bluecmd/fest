@@ -109,7 +109,7 @@ func tlsHandler(rc net.Conn) {
 		}
 	}
 	l.Infof("authz ok, principal=%q, provider=%q", s.User, s.Provider)
-	if err := backendServeConn(l, c, buf, svc.pb.GetBackend()); err != nil {
+	if err := backendServeConn(l, c, buf, svc.pb.GetBackend(), s); err != nil {
 		l.Infof("serve error: %v", err)
 	}
 }
