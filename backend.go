@@ -199,14 +199,20 @@ func authConn(l Logger, cs tls.ConnectionState, in io.Reader) (*session, Protoco
 	return authErr(fmt.Errorf("no auth logic for connection"))
 }
 
+type backend interface {
+	Serve(l Logger, c *tls.Conn, hello io.Reader) error
+}
+
 func backendServeConn(l Logger, c *tls.Conn, hello io.Reader, pb *pb.Backend) error {
-	var bc net.Conn
+	var bc backend
 	var err error
 
-	if tls := pb.GetTls(); tls != nil {
-		bc, err = newTLSBackendConn(tls, c.ConnectionState().NegotiatedProtocol)
-	} else if plain := pb.GetPlain(); plain != nil {
-		bc, err = newPlainBackendConn(plain, c.ConnectionState().NegotiatedProtocol)
+	if p := pb.GetTls(); p != nil {
+		bc, err = newTLSBackendConn(p, c.ConnectionState().NegotiatedProtocol)
+	} else if p := pb.GetPlain(); p != nil {
+		bc, err = newPlainBackendConn(p)
+	} else if p := pb.GetHttp(); p != nil {
+		bc, err = newHTTPBackendConn(p)
 	} else {
 		return fmt.Errorf("type not implemented")
 	}
@@ -214,9 +220,7 @@ func backendServeConn(l Logger, c *tls.Conn, hello io.Reader, pb *pb.Backend) er
 	if err != nil {
 		return err
 	}
-	defer bc.Close()
-
-	return glue(l, hello, c, bc, c, bc)
+	return bc.Serve(l, c, hello)
 }
 
 // Glue together the backend and the client to the best of our ability
@@ -275,19 +279,62 @@ func glue(l Logger, hello, cIn, bcIn io.Reader, cOut, bcOut io.Writer) error {
 	return nil
 }
 
-func newPlainBackendConn(pb *pb.PlainBackend, alpn string) (net.Conn, error) {
-	return net.Dial("tcp", pb.GetEndpoint())
+type plainBackend struct {
+	conn net.Conn
 }
 
-func newTLSBackendConn(pb *pb.TLSBackend, alpn string) (net.Conn, error) {
+func newPlainBackendConn(pb *pb.PlainBackend) (*plainBackend, error) {
+	conn, err := net.Dial("tcp", pb.GetEndpoint())
+	if err != nil {
+		return nil, err
+	}
+	return &plainBackend{conn: conn}, nil
+}
+
+func (b *plainBackend) Serve(l Logger, c *tls.Conn, hello io.Reader) error {
+	defer b.conn.Close()
+	return glue(l, hello, c, b.conn, c, b.conn)
+}
+
+type httpBackend struct {
+	conn net.Conn
+}
+
+func newHTTPBackendConn(pb *pb.HTTPBackend) (*httpBackend, error) {
+	conn, err := net.Dial("tcp", pb.GetEndpoint())
+	if err != nil {
+		return nil, err
+	}
+	return &httpBackend{conn: conn}, nil
+}
+
+func (b *httpBackend) Serve(l Logger, c *tls.Conn, hello io.Reader) error {
+	defer b.conn.Close()
+	return glue(l, hello, c, b.conn, c, b.conn)
+}
+
+type tlsBackend struct {
+	conn net.Conn
+}
+
+func newTLSBackendConn(pb *pb.TLSBackend, alpn string) (*tlsBackend, error) {
 	np := []string{}
 	if alpn != "" {
 		np = append(np, alpn)
 	}
-	return tls.Dial("tcp", pb.GetEndpoint(), &tls.Config{
+	conn, err := tls.Dial("tcp", pb.GetEndpoint(), &tls.Config{
 		InsecureSkipVerify: pb.GetSkipVerify(),
 		NextProtos:         np,
 	})
+	if err != nil {
+		return nil, err
+	}
+	return &tlsBackend{conn: conn}, nil
+}
+
+func (b *tlsBackend) Serve(l Logger, c *tls.Conn, hello io.Reader) error {
+	defer b.conn.Close()
+	return glue(l, hello, c, b.conn, c, b.conn)
 }
 
 func authHttpLog(r *http.Request, format string, v ...interface{}) {

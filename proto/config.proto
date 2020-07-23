@@ -53,12 +53,19 @@ message TLSBackend {
   repeated string trust = 3;
 }
 
+message HTTPBackend {
+  string endpoint = 1;
+}
+
 message Backend {
   // Enable this for backends that are over plain TCP.
   PlainBackend plain = 1;
 
   // Enable this for backends that are over TLS.
   TLSBackend tls = 2;
+
+  // Enable this for backends that are over unencrypted HTTP/1.1.
+  HTTPBackend http = 3;
 }
 
 message Service {
