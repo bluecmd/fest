@@ -16,10 +16,10 @@ Currently supported:
  * :heavy_check_mark: HTTP/2 support
  * :heavy_check_mark: Github OAuth2 support 
  * :heavy_check_mark: Prometheus metrics
+ * :heavy_check_mark: Credentials forwarding (SSO)
 
  Planned: 
  
- * :x: Credentials forwarding (SSO)
  * :x: U2F authentication
  * :x: Google OAuth2 support
  * :x: Backend plugins to allow for things like
