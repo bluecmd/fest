@@ -1,5 +1,6 @@
 fest
 .*.swp
 acme.key
+oauth_secret.go
 config.textpb
 certs/
