@@ -74,7 +74,7 @@ func (l *singleConnListener) Addr() net.Addr {
 	return l.conn.LocalAddr()
 }
 
-func extractCookie(cookies []string) (string, error) {
+func extractCookie(cookies []string) (*session, error) {
 	header := http.Header{}
 	for _, v := range cookies {
 		header.Add("Cookie", v)
@@ -82,14 +82,18 @@ func extractCookie(cookies []string) (string, error) {
 	r := http.Request{Header: header}
 
 	if c, err := r.Cookie(festCookie + "-IM"); err == nil {
-		return c.Value, ErrSessionInstallPending
+		s, err := validateSessionCookie(c.Value)
+		if err == nil && s.User != "" {
+			return s, ErrSessionInstallPending
+		}
 	}
 
 	c, err := r.Cookie(festCookie)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return c.Value, nil
+
+	return validateSessionCookie(c.Value)
 }
 
 func authz(s *session, authz *pb.Authorization) bool {
@@ -192,14 +196,9 @@ func authConn(l Logger, cs tls.ConnectionState, in io.Reader) (*session, Protoco
 			cookies = req.Header["Cookie"]
 		}
 
-		cookie, err := extractCookie(cookies)
+		s, err := extractCookie(cookies)
 		if err == ErrSessionInstallPending {
-			s, err := validateSessionCookie(cookie)
-			if err != nil {
-				l.Infof("tried to install invalid session")
-				return authErr(err)
-			}
-			return s, proto, ErrSessionInstallPending
+			return s, proto, err
 		} else if err == http.ErrNoCookie {
 			l.Infof("cookie not found")
 			return nil, proto, nil
@@ -207,9 +206,7 @@ func authConn(l Logger, cs tls.ConnectionState, in io.Reader) (*session, Protoco
 			l.Infof("cookie extraction error")
 			return authErr(err)
 		}
-
-		s, err := validateSessionCookie(cookie)
-		return s, proto, err
+		return s, proto, nil
 	}
 	return authErr(fmt.Errorf("no auth logic for connection"))
 }
