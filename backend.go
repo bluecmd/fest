@@ -33,8 +33,9 @@ const (
 )
 
 var (
-	festCookie = "FestAuth-"
-	errDone    = errors.New("done")
+	festCookie               = "FestAuth-"
+	errDone                  = errors.New("done")
+	ErrSessionInstallPending = errors.New("session install pending")
 
 	// Used to debug H2 frames
 	dumpH2 = false
@@ -79,6 +80,10 @@ func extractCookie(cookies []string) (string, error) {
 		header.Add("Cookie", v)
 	}
 	r := http.Request{Header: header}
+
+	if c, err := r.Cookie(festCookie + "-IM"); err == nil {
+		return c.Value, ErrSessionInstallPending
+	}
 
 	c, err := r.Cookie(festCookie)
 	if err != nil {
@@ -188,9 +193,18 @@ func authConn(l Logger, cs tls.ConnectionState, in io.Reader) (*session, Protoco
 		}
 
 		cookie, err := extractCookie(cookies)
-		if err == http.ErrNoCookie {
+		if err == ErrSessionInstallPending {
+			s, err := validateSessionCookie(cookie)
+			if err != nil {
+				l.Infof("tried to install invalid session")
+				return authErr(err)
+			}
+			return s, proto, ErrSessionInstallPending
+		} else if err == http.ErrNoCookie {
+			l.Infof("cookie not found")
 			return nil, proto, nil
 		} else if err != nil {
+			l.Infof("cookie extraction error")
 			return authErr(err)
 		}
 
@@ -451,15 +465,15 @@ func initOauth(w http.ResponseWriter, s *session) {
 	state := hex.EncodeToString(sdata)
 
 	oa := &oauth2.Config{
-		ClientID:     "00000000000000000000",
-		ClientSecret: "0000000000000000000000000000000000000000",
-		RedirectURL:  "https://                 /github/",
+		ClientID:     HackClientID,
+		ClientSecret: HackClientSecret,
+		RedirectURL:  HackRedirectURL,
 		Endpoint:     github.Endpoint,
 	}
 
 	// Save the state in a cookie that we can retrieve after the Oauth is complete.
 	// Use a generated suffix to allow multiple sessions to be authed at the same time.
-	sc := fmt.Sprintf("%s-%s=%s; Domain=%s; Secure; Max-Age=300", festCookie, state, s.ID(), *authDomain)
+	sc := fmt.Sprintf("%s-OSTATE-%s=%s; Domain=%s; Secure; Max-Age=300", festCookie, state, s.ID(), *authDomain)
 	h := w.Header()
 	h["host"] = []string{*authDomain}
 	h["set-cookie"] = []string{sc}
@@ -469,9 +483,9 @@ func initOauth(w http.ResponseWriter, s *session) {
 
 func authCallback(w http.ResponseWriter, r *http.Request) {
 	oa := &oauth2.Config{
-		ClientID:     "00000000000000000000",
-		ClientSecret: "0000000000000000000000000000000000000000",
-		RedirectURL:  "https://                 /github/",
+		ClientID:     HackClientID,
+		ClientSecret: HackClientSecret,
+		RedirectURL:  HackRedirectURL,
 		Endpoint:     github.Endpoint,
 	}
 	q := r.URL.Query()
@@ -491,7 +505,7 @@ func authCallback(w http.ResponseWriter, r *http.Request) {
 
 	var s *session
 	for _, cookie := range r.Cookies() {
-		if cookie.Name == fmt.Sprintf("%s-%s", festCookie, state) {
+		if cookie.Name == fmt.Sprintf("%s-OSTATE-%s", festCookie, state) {
 			var err error
 			s, err = validateSessionCookie(cookie.Value)
 			if err != nil {
@@ -540,7 +554,7 @@ func authCallback(w http.ResponseWriter, r *http.Request) {
 	s.Provider = pb.Provider_GITHUB
 	authHttpLog(r, "oauth completed for user=%q, provider=%q", s.User, s.Provider)
 
-	sc := fmt.Sprintf("%s-%s=; Domain=%s; Secure; Expires=Thu, 01 Jan 1970 00:00:00 GMT", festCookie, state, *authDomain)
+	sc := fmt.Sprintf("%s-OSTATE-%s=; Domain=%s; Secure; Expires=Thu, 01 Jan 1970 00:00:00 GMT", festCookie, state, *authDomain)
 	h := w.Header()
 	h["host"] = []string{*authDomain}
 	h["set-cookie"] = []string{sc}
@@ -573,7 +587,7 @@ func redirectAuthn(c *tls.Conn, proto Protocol, svc *Service) error {
 		ur.RawQuery = q.Encode()
 		r.Header = make(http.Header)
 		r.Header.Add("host", domain)
-		r.Header.Add("set-cookie", s.Cookie(domain))
+		r.Header.Add("set-cookie", s.AuthCookie(domain))
 		r.Header.Add("location", ur.String())
 		r.Write(c)
 		return nil
@@ -599,6 +613,29 @@ func authzError(c *tls.Conn, proto Protocol, svc *Service) error {
 		r.Header.Add("content-type", "text/plain")
 		r.ContentLength = int64(len(msg))
 		r.Body = ioutil.NopCloser(strings.NewReader(msg))
+		r.Write(c)
+		return nil
+	}
+	return fmt.Errorf("unknown protocol specified (%v)", proto)
+}
+
+func installSession(c *tls.Conn, proto Protocol, svc *Service, s *session) error {
+	if proto == Protocol_HTTP2 {
+		// TODO(bluecmd): This should be easy enough to implement
+		return fmt.Errorf("http2 session install not implemented")
+	}
+	domain := svc.pb.GetName()
+	if proto == Protocol_HTTP1 {
+		r := &http.Response{
+			StatusCode: 302,
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+		}
+		r.Header = make(http.Header)
+		r.Header.Add("host", domain)
+		r.Header.Add("location", "#")
+		r.Header.Add("set-cookie", fmt.Sprintf("%s-IM=; Domain=%s; Secure; Expires=Thu, 01 Jan 1970 00:00:00 GMT", festCookie, domain))
+		r.Header.Add("set-cookie", s.Cookie(domain))
 		r.Write(c)
 		return nil
 	}

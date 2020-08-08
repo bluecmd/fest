@@ -134,6 +134,12 @@ func (s *session) Cookie(domain string) string {
 	return fmt.Sprintf("%s=%s; Domain=%s; Secure; Max-Age=%d", festCookie, id, domain, age)
 }
 
+func (s *session) AuthCookie(domain string) string {
+	age := 300
+	id := base64.URLEncoding.EncodeToString(s.id[:])
+	return fmt.Sprintf("%s-IM=%s; Domain=%s; Secure; Max-Age=%d", festCookie, id, domain, age)
+}
+
 func (s *session) IsValid() bool {
 	return time.Now().Before(s.exp)
 }
