@@ -79,6 +79,14 @@ func tlsHandler(rc net.Conn) {
 	}
 
 	s, proto, err := authConn(l, c.ConnectionState(), tee)
+	if err == ErrSessionInstallPending {
+		l.Infof("installing new session")
+		if err := installSession(c, proto, svc, s); err != nil {
+			l.Infof("install error: %v", err)
+			return
+		}
+		return
+	}
 	if err != nil {
 		l.Infof("auth error: %v", err)
 	}
