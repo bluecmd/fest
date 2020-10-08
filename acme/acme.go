@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	LifetimePadding = 7 * 24 * time.Hour
+	LifetimePadding = 21 * 24 * time.Hour
 )
 
 var (
