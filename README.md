@@ -1,5 +1,11 @@
 # Front-End for easy Secure Transport (FEST)
 
+***Deprecated***. This was a fun experiment but in the end the amount of corner-cases
+both in terms of protocol but also implementation of frontends this is too big
+for me to continue working on. I will personally be switching to using
+[Pomerium](https://www.pomerium.io/docs/) and
+[prodaccess](https://github.com/dhtech/prodaccess).
+
 FEST, which also happens to mean Party or Feast in Swedish, is
 a proxy that lives on the edge of a network providing easy TLS management,
 as well as secure user management.
